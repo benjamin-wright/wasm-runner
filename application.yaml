@@ -1,0 +1,15 @@
+# Illustrative paths: build these components before running the application.
+name: hello
+
+functions:
+  greet:
+    module: ./build/greet.wasm
+    http:
+      method: GET
+      path: /hello
+
+  echo:
+    module: ./build/echo.wasm
+    http:
+      method: POST
+      path: /echo
