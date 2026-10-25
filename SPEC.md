@@ -1,5 +1,9 @@
 # First iteration
 
+This is the intended behavior, not an implemented server. The
+[WIT world](wit/world.wit) is authoritative for the guest interface. The
+[architecture](ARCHITECTURE.md) records the implementation decisions.
+
 ## Goal
 
 Run an application described by one YAML manifest. Each named function points to
@@ -80,14 +84,34 @@ decode, normalize slashes, or redirect. HEAD and OPTIONS require explicit routes
 there are no implicit handlers. Unknown paths return 404. A known path with an
 unregistered method returns 405 with the registered methods in `Allow`.
 
-Pass the request method, URI, headers, and body through the WASI HTTP interfaces.
-Preserve repeated end-to-end headers. The server owns HTTP framing and removes
-hop-by-hop headers. A HEAD response never transmits body bytes.
+Serve HTTP/1.1 over TCP in the first iteration. Accept origin-form request targets
+(`/path?query`); reject other target forms with 400. HTTP/2, upgrades, and request
+trailers are outside this iteration; a request with trailers receives 400.
 
-Buffer at most 1 MiB of request body; return 413 if exceeded. Stream responses
-with backpressure and a 1 MiB total body limit. Failure before sending response
-headers returns a host-generated error; failure after headers closes the stream.
-Never retry an invocation automatically.
+Pass method, raw path, optional raw query without `?`, headers, and body through
+the custom WIT request record. Preserve the distinction between no query and an
+empty query. Header names are lowercase; values must be UTF-8 text. A request
+with non-UTF-8 header values receives 400 without invoking a guest.
+
+Preserve repeated end-to-end headers, including separate `Set-Cookie` fields.
+Remove hop-by-hop headers and every field named by `Connection`, in both
+directions. The host owns framing: consume request framing headers rather than
+forwarding them, and ignore guest `Content-Length` and `Transfer-Encoding` in
+favor of framing the actual returned body. A HEAD response never transmits body
+bytes; its content length describes the returned representation. Statuses 204
+and 304 require an empty guest body, otherwise the response is invalid.
+
+Buffer at most 1 MiB of request body, counting actual bytes regardless of declared
+length; return 413 if exceeded. Obtain the complete guest response and validate
+its status (200–599), header syntax and limits, and body size (at most 1 MiB)
+before committing headers. An oversized or malformed response receives 500.
+Socket writes use backpressure, but there is no guest response streaming.
+Failure before sending response headers returns a host-generated error; failure
+after headers closes the connection. Never retry an invocation automatically.
+
+Route misses, overload, and other rejections may leave the request body unread.
+In that case close the connection after the response rather than draining an
+unbounded body or reusing a connection with unread bytes.
 
 | Condition before response headers | Response |
 | --- | --- |
@@ -106,28 +130,48 @@ memory per invocation, and a 30-second invocation deadline. These are execution
 limits, not a guarantee about total process memory. Reject excess work immediately;
 there is no application request queue.
 
-The deadline covers body intake, guest execution, and response streaming. Bound
-transport connections and header-read time separately so idle clients cannot
-consume unlimited resources. Implementation must cancel looping guests, propagate
-client disconnects, and release resources after traps and timeouts. Do not hold a
-global execution lock while awaiting a guest or client.
+The memory budget applies across all linear memories in the invocation, including
+initial allocations. It is not a separate 64 MiB allowance for each memory.
+
+Acquire an execution slot without waiting after route matching, before body
+intake. Start the deadline then and retain the slot until the response finishes
+or the connection closes. The deadline covers body intake, instantiation, guest
+execution, response validation, and socket writes. If it expires after headers
+have been committed, close the connection; a new 504 cannot be sent.
+
+Use a separate limit of 128 accepted connections, a 10-second header-read/idle
+timeout, and at most 100 header fields and 32 KiB of header data in either
+direction. Incoming header violations are rejected before invocation; guest
+header violations receive 500. Refuse excess connections without creating more
+connection tasks. HTTP parser failures may close the connection or send its own
+4xx response. Bound guest tables and internal instance counts as described in
+the architecture as well as linear memory.
+
+Implementation must cancel looping guests, propagate observed client disconnects,
+and release resources after traps and timeouts. A silent network failure is
+bounded by the deadline, not instantaneously detectable. Do not hold a global
+execution lock while awaiting a guest or client.
 
 ## Guest contract
 
-[`wit/world.wit`](wit/world.wit) is the authoritative guest world. It includes
-standard WASI HTTP 0.2.6; there are no custom host imports. See the
-[contract notes](wit/README.md) for the initial host policy.
+[`wit/world.wit`](wit/world.wit) is the authoritative guest world:
+`local:http@0.1.0`, exporting `handler.handle(request) -> response`. It has no
+imports or dependencies. Both bodies are buffered byte lists; header values are
+strings. This is not the WASI HTTP contract. Components requiring WASI or any
+other host imports fail preparation. See the [contract notes](wit/README.md).
 
 Log one completion event per invocation with function, method, path without query,
-status, duration, and outcome. Capture guest stdout/stderr with function and
-invocation context, with bounded buffering. Do not log request or response bodies,
-query values, or headers by default.
+status if committed, duration, and outcome. Include a host-generated invocation
+identifier. There is no guest stdout/stderr or logging import to capture. Do not
+log request or response bodies, query values, or headers by default. Detailed
+startup errors may name local files; HTTP errors must not expose runtime internals.
 
 ## Out of scope
 
 KV, SQL, messaging, timers, outbound HTTP, filesystem access, secrets and
 environment injection, management APIs, Web UI, TLS, hot reload, deployment
-history, remote artifacts, plugins, and automatic guest builds.
+history, remote artifacts, plugins, automatic guest builds, WASI HTTP compatibility,
+guest streaming, and guest standard I/O.
 
 Add new host capabilities only when a concrete application needs them. Do not
 reserve configuration fields or introduce generic providers for future features.
@@ -137,11 +181,15 @@ reserve configuration fields or introduce generic providers for future features.
 - Build a greeting component and an echo component against the guest world.
 - Run the example from a different working directory and reach both endpoints.
 - Verify exact routing, 404, 405, and repeated response headers.
+- Verify absent versus empty queries, binary bodies, non-UTF-8 request header
+  rejection, hop-by-hop header removal, and HEAD/204/304 response handling.
 - Demonstrate useful errors for a bad field, missing module, incompatible component,
   duplicate route, and occupied port; none leaves a partially serving application.
 - Demonstrate fresh guest state for successive requests.
 - Demonstrate overload rejection, request/response bounds, timeout of a looping
   guest, and cancellation when a client disconnects.
+- Verify that aggregate memory growth across multiple memories is bounded and
+  that slow body uploads and response consumers cannot bypass admission limits.
 - Stop with Ctrl-C, then start again on the same port.
 
 These are implementation acceptance criteria; this starter does not claim that a
