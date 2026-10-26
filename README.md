@@ -19,7 +19,7 @@ make setup
 make check
 make install
 wr --help
-wr run application.yaml --listen 127.0.0.1:9000
+wr run examples/application.yaml --listen 127.0.0.1:9000
 ```
 
 `make setup` installs the Rust version, Clippy, and rustfmt specified in
@@ -39,14 +39,15 @@ Environment variables do not alter configuration.
 function count, routes in function-name order, and resolved module paths.
 Relative module paths resolve against the manifest's directory. Invalid manifests
 exit nonzero with an error before printing metadata. The listener is not bound and module files are not
-opened, so the [example manifest](application.yaml) works without compiled guests.
+opened, so the [example manifest](examples/application.yaml) works without compiled guests.
 
 The manifest's data contract is [application.schema.json](application.schema.json),
 a JSON Schema draft-07 document that can also be used by editor tooling. The
 schema is embedded in `wr`; it does not need to accompany the manifest at runtime.
 YAML anchors, aliases, and merge keys are resolved before schema validation.
-Validation errors identify fields using paths such as `/functions/greet/http/method`.
-Duplicate routes are checked in Rust after schema validation.
+Duplicate routes are checked after schema validation. Diagnostics use the detail
+provided by the libraries, with basic context, rather than a prescribed
+error-location format.
 
 ## CLI development
 
@@ -63,7 +64,7 @@ For a quick edit/build/run loop, invoke the newly built binary directly:
 ```sh
 make build
 ./target/debug/wr --help
-./target/debug/wr run application.yaml --listen 127.0.0.1:9000
+./target/debug/wr run examples/application.yaml --listen 127.0.0.1:9000
 make check
 ```
 
@@ -73,7 +74,7 @@ This uses the debug build in the checkout; the installed `wr` is updated only by
 Alternatively, build and run in one Cargo command:
 
 ```sh
-cargo run --locked -- run application.yaml --listen 127.0.0.1:9000
+cargo run --locked -- run examples/application.yaml --listen 127.0.0.1:9000
 ```
 
 Cargo options go before `--`; everything after it is passed to `wr`.
@@ -93,33 +94,10 @@ uniqueness before returning the application.
 [src/run.rs](src/run.rs) prints metadata and is the entry point for future
 application preparation and serving.
 
-## Intended experience
-
-Build your functions as WebAssembly components implementing the
-[`http-function` world](wit/world.wit), then run:
-
-```sh
-wr run application.yaml
-```
-
-Once implemented, the server will validate the whole application before listening,
-print its routes, and stay in the foreground. Edit, rebuild, and restart to change
-the application.
-
-```text
-hello listening on http://127.0.0.1:8080
-GET   /hello  -> greet
-POST  /echo   -> echo
-Ctrl-C to stop
-```
-
 ## Design
 
-The host will use Rust, Wasmtime, and Tokio/Hyper. Each request gets a fresh
-component instance with no host imports. Requests and responses cross the
-component boundary as complete, buffered values through our custom WIT contract.
-
-Read the [technology and architecture decisions](ARCHITECTURE.md), the
-[first-iteration spec](SPEC.md), the [example manifest](application.yaml), and the
-[guest contract notes](wit/README.md). The [WIT world](wit/world.wit) is
-authoritative for the guest interface; the spec defines host behavior.
+Read the [architecture](ARCHITECTURE.md), the
+[current functionality spec](SPEC.md), and the
+[example manifest](examples/application.yaml). The [guest interface notes](wit/README.md)
+describe a WIT sketch that is not yet used by the executable. Runtime and HTTP
+design details will be documented as those features are implemented.

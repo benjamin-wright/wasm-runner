@@ -3,7 +3,7 @@
 .PHONY: setup update-deps build install check
 
 setup:
-	rustup toolchain install
+	rustup show
 
 update-deps:
 	cargo update

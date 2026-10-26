@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-const EXAMPLE: &str = include_str!("../application.yaml");
+const EXAMPLE: &str = include_str!("../examples/application.yaml");
 
 struct ManifestFixture {
     directory: PathBuf,
