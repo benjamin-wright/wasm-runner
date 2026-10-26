@@ -1,4 +1,5 @@
 mod cli;
+mod manifest;
 mod run;
 
 use std::process::ExitCode;
@@ -17,7 +18,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("error: {error:#}");
             ExitCode::FAILURE
         }
     }

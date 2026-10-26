@@ -47,14 +47,24 @@ resolve relative to the manifest's directory, regardless of the working director
 Absolute paths are allowed. Multiple functions may reference the same component.
 
 Methods are GET, HEAD, POST, PUT, PATCH, DELETE, and OPTIONS. Paths start with `/`
-and contain no query, fragment, whitespace, percent escapes, or wildcard syntax.
+and contain no query, fragment, whitespace, control characters, percent escapes,
+or wildcard syntax.
 There are no path parameters. A trailing slash is significant.
 
-Reject unknown fields, duplicate YAML mapping keys, missing values, wrong types,
-and duplicate method/path pairs. Accept one YAML document with no custom tags,
-merge keys, or aliases. There is no interpolation or inherited configuration.
-Errors identify the manifest location and field, such as
-`functions.greet.module: file does not exist`.
+Accept one YAML document. Delegate YAML syntax and tag handling to the parser,
+including anchors, aliases, and merge-key resolution. The application adds no
+tag handlers, interpolation, or loading of external configuration.
+
+Validate the resolved data against [application.schema.json](application.schema.json),
+the JSON Schema draft-07 contract for required fields, types, identifiers, paths,
+and allowed properties. Module paths must be nonempty and contain no NUL characters.
+Reject duplicate YAML mapping keys during parsing and duplicate method/path pairs
+in application validation. Schema validation uses the embedded contract; it does
+not require a schema file beside the manifest or fetch remote schemas.
+
+Errors identify the manifest file and relevant field. Schema errors use JSON
+Pointer paths, such as `/functions/greet/module`. YAML syntax errors retain the
+parser's source locations; schema errors need not include YAML line numbers.
 
 There is no application version, namespace, placement, capability block, storage
 configuration, or build command. Build tools are the user's choice.

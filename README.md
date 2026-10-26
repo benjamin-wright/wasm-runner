@@ -3,10 +3,10 @@
 A small, standalone WebAssembly application server: one manifest, one component
 per function, and HTTP endpoints. The command is `wr`.
 
-This repository contains a Rust CLI skeleton alongside the specification and
-guest contract. The `run` command parses its arguments and exits with a clear
-not-implemented error. It does not yet load manifests, start a server, or include
-compiled example components.
+This repository contains a Rust CLI alongside the specification and guest
+contract. The `run` command loads and validates an application YAML manifest,
+prints its metadata, and exits successfully. It does not yet load WebAssembly
+components or start an HTTP server.
 
 ## Local setup
 
@@ -31,10 +31,22 @@ command; use `cargo uninstall wasm-runner` to remove it.
 
 Arguments after `wr` go directly to the application. `run` requires a manifest
 path. The listener defaults to `127.0.0.1:8080` and accepts numeric IPv4 or
-bracketed IPv6 addresses with a port. Hostnames are rejected. Configuration is
-taken only from command-line arguments. Currently, `wr run` exits with the
-expected not-implemented error; `wr --help` and `make check` work without guest
-components.
+bracketed IPv6 addresses with a port. Hostnames are rejected. Application settings
+come from the manifest; the listener setting comes from the command line.
+Environment variables do not alter configuration.
+
+`wr run` reports the application name, manifest path, configured listener,
+function count, routes in function-name order, and resolved module paths.
+Relative module paths resolve against the manifest's directory. Invalid manifests
+exit nonzero with an error before printing metadata. The listener is not bound and module files are not
+opened, so the [example manifest](application.yaml) works without compiled guests.
+
+The manifest's data contract is [application.schema.json](application.schema.json),
+a JSON Schema draft-07 document that can also be used by editor tooling. The
+schema is embedded in `wr`; it does not need to accompany the manifest at runtime.
+YAML anchors, aliases, and merge keys are resolved before schema validation.
+Validation errors identify fields using paths such as `/functions/greet/http/method`.
+Duplicate routes are checked in Rust after schema validation.
 
 ## CLI development
 
@@ -73,7 +85,12 @@ deliberately refresh dependency versions, then review and commit the result.
 Build, install, and check use `--locked` and never update the lockfile.
 
 Argument definitions live in [src/cli.rs](src/cli.rs); command dispatch and error reporting
-live in [src/main.rs](src/main.rs). The [src/run.rs](src/run.rs) placeholder is the entry point for future
+live in [src/main.rs](src/main.rs). Manifest loading and validation live in
+[src/manifest.rs](src/manifest.rs), which parses YAML with `yaml_serde`, validates
+the resolved data with `jsonschema`, and deserializes directly into the returned
+application types. Its `load` function resolves module paths and checks route
+uniqueness before returning the application.
+[src/run.rs](src/run.rs) prints metadata and is the entry point for future
 application preparation and serving.
 
 ## Intended experience

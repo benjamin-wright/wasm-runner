@@ -11,7 +11,7 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Run an application from a YAML manifest (not yet implemented)
+    /// Load an application YAML manifest and print metadata (serving not yet implemented)
     Run {
         /// Path to the application manifest
         #[arg(value_name = "MANIFEST")]

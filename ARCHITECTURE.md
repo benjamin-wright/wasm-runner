@@ -1,10 +1,15 @@
 # Technology and internal architecture
 
-Status: design for the first implementation. There is no runtime in this
-repository yet. [SPEC.md](SPEC.md) defines host behavior;
+Status: manifest loading, validation, and CLI metadata output are implemented.
+The runtime and HTTP server remain planned. [SPEC.md](SPEC.md) defines host behavior;
 [wit/world.wit](wit/world.wit) defines the guest interface and takes precedence
 over any description of that interface. [application.yaml](application.yaml)
 remains the complete configuration format.
+
+Future runtime structures and ownership mechanisms below are provisional design
+notes. Establish their boundaries when implementing the relevant behavior; do not
+scaffold them in advance. The specification defines the required behavior and
+limits, while implementation experience should guide the supporting structures.
 
 ## Decisions
 
@@ -14,7 +19,8 @@ remains the complete configuration format.
 | Runtime | Embedded Wasmtime with its Component Model API and Cranelift | Compile components once, generate typed bindings from WIT, instantiate independently per request |
 | HTTP and scheduling | Tokio plus Hyper's HTTP/1 server API, `hyper-util`, `http-body-util`, and `bytes` | Control exact routing, connection admission, deadlines, and response ownership without a framework router |
 | CLI | `clap` | A small typed `run` subcommand with a required manifest and optional numeric socket address |
-| Manifest | `yaml-rust2` parser events and a small schema validator | Detect duplicate keys, tags, aliases, and source locations before conversion can discard information |
+| Manifest | `yaml_serde`, an embedded JSON Schema validated by `jsonschema`, and directly deserialized application types | Delegate YAML syntax and field validation to libraries while returning ordinary application values |
+| CLI errors | `anyhow::Result` with context at operation boundaries | Preserve underlying causes through loading and command execution; print the error chain once at the CLI entry point |
 | Diagnostics | `tracing` and `tracing-subscriber`; typed internal errors | Correlate host events per invocation and keep public HTTP errors separate from diagnostic detail |
 | First guest examples | Rust with `wit-bindgen`, packaged using `wasm-tools` | Exercise the same WIT on both sides and provide a reproducible no-import guest build |
 
@@ -50,28 +56,29 @@ The package version is an interface version, not an application version.
 
 ## Modules and ownership
 
-The following are proposed module boundaries, not files that already exist:
+The implemented module boundaries are:
 
 | Module | Responsibility | Owns |
 | --- | --- | --- |
 | `cli` | Parse arguments and report startup failures | Manifest path and listener address |
-| `manifest` | Parse, validate, and resolve relative paths | Validated function definitions with source locations |
-| `runtime` | Compile, check the contract, instantiate, invoke, and clean up | Shared engine and prepared components; per-call store and limiter |
-| `application` | Prepare all functions and build exact route lookup | Immutable prepared application |
-| `http` | Adapt transport requests/responses and apply admission | Connection tasks, body buffers, invocation permits |
-| `lifecycle` | Signals, cancellation, epoch ticker, and task supervision | Shutdown state and task handles |
-| `diagnostics` | Translate errors and record outcomes once | Error categories and completion-event guard |
+| `manifest` | Parse, validate, resolve relative paths, and return application definitions | Embedded schema, application types, and loading errors |
+| `run` | Orchestrate manifest loading and print metadata | Metadata output |
 
-An immutable `PreparedApplication` contains the application name, a map from
-function ID to prepared component, and a route table. Use an exact map from
-raw path to a method map; it supplies both route lookup and a deterministic,
-sorted `Allow` value. Each route stores a function reference, not a file path
-to reread during requests.
+Runtime preparation, HTTP handling, shutdown, and diagnostics are future
+responsibilities. Choose their module boundaries as those features are implemented.
 
-Share one engine and immutable compiled/pre-instantiated components through
-reference-counted handles. Never share a mutable store or guest instance. Each
-invocation owns its store, instance, memory limiter, deadline, and cancellation
-state. A connection supervisor owns the invocation until transport completion.
+Function definitions use a `HashMap` for lookup. The CLI sorts borrowed entries
+when printing metadata; display order does not dictate application storage.
+
+One possible prepared representation is an immutable application name, map from
+function ID to prepared component, and route table. An exact map from raw path to
+method entries could supply route lookup and a sorted `Allow` value. Decide the
+concrete representation when implementing preparation and routing.
+
+Shared engine and component handles may support reuse while each invocation owns
+its guest state. A connection supervisor is one possible way to retain invocation
+resources until transport completion; its necessity and shape should be established
+alongside HTTP execution.
 
 ```mermaid
 flowchart TD
@@ -93,13 +100,22 @@ flowchart TD
 
 ## Preparation transaction
 
-1. Parse exactly one YAML document using marked events. Reject duplicate keys
-   within each mapping, merge keys, aliases, and custom tags before constructing
-   typed definitions. Apply YAML scalar typing, so a boolean or number cannot
-   silently become a required string. Reject unknown fields at every level.
-2. Validate identifiers, methods, literal paths, and unique method/path pairs.
-   Resolve module paths against the manifest's directory. Preserve the function
-   ID, original path, and field location in error context.
+1. Parse exactly one YAML document with `yaml_serde` into its generic value tree.
+   Use the library's normal syntax and tag handling; aliases are supported and
+   `apply_merge` resolves merge keys. Its mapping deserializer rejects duplicate
+   keys. Convert the resolved tree into `serde_json::Value` and validate it using
+   [application.schema.json](application.schema.json). The draft-07 schema owns
+   field constraints, required and allowed properties, and the nonempty function
+   map. Embed the schema and compile a local validator when loading the manifest.
+   Disable `jsonschema`'s default features: this contract uses only local references
+   and needs no HTTP or file retrieval. Report schema errors with JSON Pointer
+   field paths; parser syntax errors retain their source locations.
+2. Deserialize the validated values directly into `ApplicationDefinition`, including
+   its HTTP method enum. The module-level `load` function resolves module paths
+   against the manifest's directory and checks unique method/path pairs before
+   returning. Callers receive ordinary application fields without YAML wrappers.
+   Introduce private intermediate types only if parsing later requires a different
+   representation; preserve the returned fields and semantics for callers.
 3. Read each distinct resolved component file once and compile sequentially.
    Repeated references to that path share prepared code. Content-addressed or
    persistent caches are unnecessary initially. Never deserialize arbitrary
