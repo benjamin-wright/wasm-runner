@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "properties": {
     "name": { "$ref": "#/definitions/identifier" },
+    "dependencies": { "$ref": "#/definitions/dependencies" },
     "functions": {
       "type": "object",
       "minProperties": 1,
@@ -15,6 +16,29 @@
     }
   },
   "definitions": {
+    "dependencies": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
+      "additionalProperties": { "$ref": "#/definitions/dependency" }
+    },
+    "dependency": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["version"],
+          "additionalProperties": false,
+          "properties": {
+            "version": { "type": "string", "minLength": 1 },
+            "features": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "default-features": { "type": "boolean" }
+          }
+        }
+      ]
+    },
     "identifier": {
       "description": "A lowercase identifier of 1 to 64 letters, digits, or hyphens, starting with a letter.",
       "type": "string",
@@ -22,9 +46,10 @@
     },
     "function": {
       "type": "object",
-      "required": ["module", "http"],
+      "required": ["http"],
       "additionalProperties": false,
       "properties": {
+        "dependencies": { "$ref": "#/definitions/dependencies" },
         "module": {
           "description": "A component file path, resolved relative to the manifest directory unless absolute.",
           "type": "string",

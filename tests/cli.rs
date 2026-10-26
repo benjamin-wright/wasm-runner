@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-const EXAMPLE: &str = include_str!("../examples/application.yaml");
+const EXAMPLE: &str = include_str!("fixtures/application.yaml");
 
 struct ManifestFixture {
     directory: PathBuf,
@@ -72,6 +72,7 @@ fn invalid_invocations_are_rejected() {
     for arguments in [
         vec![],
         vec!["run"],
+        vec!["setup"],
         vec!["build"],
         vec!["run", "application.yaml", "--listen"],
         vec!["run", "application.yaml", "--listen", "localhost:9000"],
@@ -81,6 +82,101 @@ fn invalid_invocations_are_rejected() {
         let output = wr(&arguments);
         assert_eq!(output.status.code(), Some(2), "{arguments:?}");
         assert!(!output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn setup_previews_workspace_without_writing_files() {
+    let fixture = ManifestFixture::new(include_str!("fixtures/setup/application.yaml"));
+    let output = wr(&["setup", fixture.path.to_str().unwrap(), "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        include_str!("fixtures/setup/stdout.txt")
+    );
+    assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 1);
+
+    let output = fixture.run(&[]);
+    assert!(output.status.success());
+    let metadata = String::from_utf8(output.stdout).unwrap();
+    for name in ["greet", "echo"] {
+        assert!(
+            metadata.contains(
+                fixture
+                    .directory
+                    .join(format!(".wr/components/{name}.wasm"))
+                    .to_str()
+                    .unwrap()
+            )
+        );
+    }
+}
+
+#[test]
+fn setup_writes_the_previewed_files_beside_the_manifest_and_can_be_repeated() {
+    let fixture = ManifestFixture::new(include_str!("fixtures/setup/application.yaml"));
+    for _ in 0..2 {
+        let output = wr(&["setup", fixture.path.to_str().unwrap()]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+
+        for file in include_str!("fixtures/setup/stdout.txt")
+            .split("\n=== ")
+            .skip(1)
+        {
+            let (path, contents) = file.split_once(" ===\n").unwrap();
+            let expected = contents.strip_suffix('\n').unwrap();
+            assert_eq!(
+                fs::read_to_string(fixture.directory.join(path)).unwrap(),
+                expected,
+                "{path}"
+            );
+        }
+    }
+}
+
+#[test]
+fn setup_preserves_an_existing_handwritten_cargo_manifest() {
+    let fixture = ManifestFixture::new(include_str!("fixtures/setup/application.yaml"));
+    let path = fixture.directory.join("Cargo.toml");
+    let handwritten = "[workspace]\nmembers = []\n";
+    fs::write(&path, handwritten).unwrap();
+
+    let output = wr(&["setup", fixture.path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite"));
+    assert_eq!(fs::read_to_string(path).unwrap(), handwritten);
+    assert!(!fixture.directory.join(".wr").exists());
+}
+
+#[test]
+fn setup_rejects_invalid_dependencies_without_partial_output() {
+    let source = include_str!("../examples/application.yaml");
+    for invalid in [
+        source.replace("anyhow: \"1.0\"", "anyhow: 1.0"),
+        source.replace(
+            "anyhow: \"1.0\"",
+            "anyhow: {version: '1.0', features: derive}",
+        ),
+        source.replace("anyhow: \"1.0\"", "anyhow: {version: '1.0', typo: true}"),
+        source.replace("serde_json:", "anyhow:"),
+    ] {
+        let fixture = ManifestFixture::new(&invalid);
+        let output = wr(&["setup", fixture.path.to_str().unwrap()]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 1);
     }
 }
 
@@ -375,7 +471,6 @@ fn missing_and_wrong_typed_fields_are_rejected() {
         String::from("name: hello\nfunctions: null"),
         EXAMPLE.replace("name: hello", ""),
         String::from("name: hello\nfunctions: []"),
-        EXAMPLE.replace("    module: ./build/greet.wasm\n", ""),
         EXAMPLE.replace("name: hello", "name: true"),
         EXAMPLE.replace("greet:", "true:"),
         EXAMPLE.replace("module: ./build/greet.wasm", "module: 42"),

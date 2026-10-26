@@ -11,6 +11,16 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Generate a Cargo workspace for source functions
+    Setup {
+        /// Path to the application manifest
+        #[arg(value_name = "MANIFEST")]
+        manifest: PathBuf,
+
+        /// Print the generated file paths and contents without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Load an application YAML manifest and print metadata (serving not yet implemented)
     Run {
         /// Path to the application manifest

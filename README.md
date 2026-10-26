@@ -6,7 +6,9 @@ per function, and HTTP endpoints. The command is `wr`.
 This repository contains a Rust CLI alongside the specification and guest
 contract. The `run` command loads and validates an application YAML manifest,
 prints its metadata, and exits successfully. It does not yet load WebAssembly
-components or start an HTTP server.
+components or start an HTTP server. The `setup` command writes a generated
+Cargo workspace for source functions. Use `--dry-run` to preview file paths
+and contents instead.
 
 ## Local setup
 
@@ -19,6 +21,7 @@ make setup
 make check
 make install
 wr --help
+wr setup examples/application.yaml
 wr run examples/application.yaml --listen 127.0.0.1:9000
 ```
 
@@ -29,7 +32,7 @@ into Cargo's binary directory (normally `~/.cargo/bin`). Ensure that directory i
 on your `PATH`. Repeat `make install` after changes to refresh the installed
 command; use `cargo uninstall wasm-runner` to remove it.
 
-Arguments after `wr` go directly to the application. `run` requires a manifest
+Arguments after `wr` go directly to the application. Both `run` and `setup` require a manifest
 path. The listener defaults to `127.0.0.1:8080` and accepts numeric IPv4 or
 bracketed IPv6 addresses with a port. Hostnames are rejected. Application settings
 come from the manifest; the listener setting comes from the command line.
@@ -49,6 +52,65 @@ Duplicate routes are checked after schema validation. Diagnostics use the detail
 provided by the libraries, with basic context, rather than a prescribed
 error-location format.
 
+## Guest workspace setup
+
+```sh
+cargo run --locked -- setup examples/application.yaml
+cargo run --locked -- setup examples/application.yaml --dry-run
+```
+
+Functions without a `module` field use `functions/<name>.rs` next to the manifest.
+Their eventual component path is `.wr/components/<name>.wasm`. Explicit `module`
+paths still describe prebuilt components; `setup` skips those functions and
+requires at least one source function. Setup references source files without
+reading them, so they need not exist yet.
+
+Top-level `dependencies` are available to every source function. Each function
+can add its own `dependencies`. A dependency is a version string or an object
+with `version`, optional `features`, and optional `default-features`, matching
+the corresponding Cargo fields. Declaring the same dependency globally and
+locally is an error during setup. Path, Git, and optional dependencies are not
+supported in this first pass. Cargo version requirements are passed through;
+they are not resolved or checked by setup.
+
+The generated `Cargo.toml` sits beside the application manifest and defines a
+workspace with one `cdylib` package per source function under `.wr/functions/<name>`.
+Packages are named `wr-function-<name>`. Each package sets `lib.path` directly to
+the original function file and inherits common dependencies from the workspace.
+No source wrappers are generated. The [example handlers](examples/functions)
+are ordinary Rust functions and do not yet implement the
+[proposed WIT interface](wit/README.md).
+
+Setup creates the generated files' parent directories and overwrites those
+files when run again. It refuses to overwrite a root `Cargo.toml` unless it has
+the generated-file header written by setup. Other files are left alone, including
+old generated wrappers and manifests. Member manifests explicitly select the
+application workspace, so an old `.wr/Cargo.toml` is not used.
+The example ignores `.wr`, the generated root `Cargo.toml`, and `target` in
+version control. Cargo now maintains `Cargo.lock` beside the application manifest;
+keep that lockfile in version control. Add the same ignore rules when using
+setup in another project.
+
+With `--dry-run`, setup only prints the proposed file layout and contents and
+does not write files or create directories. Neither mode runs Cargo, installs
+prerequisites, generates lockfiles, builds WASM, packages components, or watches
+for changes. The preview is human-readable output, not an executable script.
+`make setup` remains the separate command for setting up this repository's Rust
+toolchain.
+
+### VS Code
+
+Run setup, then open `examples` as the VS Code workspace. Its root `Cargo.toml`
+is discoverable by rust-analyzer, and the explicit `lib.path` entries expose
+the original handler files without `vfs.extraIncludes` settings. Remove any old
+`linkedProjects` setting pointing at `.wr/Cargo.toml`.
+
+Opening the parent repository still discovers the host workspace; to load both
+in that window, explicitly link `Cargo.toml` and `examples/Cargo.toml` using
+`rust-analyzer.linkedProjects`, or open `examples` in a separate window.
+If hover information is missing after generating the workspace, run
+**rust-analyzer: Restart server** from the Command Palette.
+
 ## CLI development
 
 | Target | Purpose |
@@ -57,7 +119,7 @@ error-location format.
 | `make update-deps` | Create or update the lockfile to the latest compatible dependencies |
 | `make build` (or `make`) | Compile a debug CLI for local development |
 | `make install` | Build and install `wr` from this checkout |
-| `make check` | Check formatting, lint, and run tests |
+| `make check` | Check formatting, lint, and run tests across the workspace |
 
 For a quick edit/build/run loop, invoke the newly built binary directly:
 
@@ -92,7 +154,10 @@ the resolved data with `jsonschema`, and deserializes directly into the returned
 application types. Its `load` function resolves module paths and checks route
 uniqueness before returning the application.
 [src/run.rs](src/run.rs) prints metadata and is the entry point for future
-application preparation and serving.
+application preparation and serving. [src/setup.rs](src/setup.rs) coordinates
+generation and selects writing or previewing. The separate
+[wasm-runner-setup crate](crates/wasm-runner-setup) renders workspace and member
+manifests and writes them through a separate filesystem function.
 
 ## Design
 

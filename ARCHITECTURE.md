@@ -1,7 +1,8 @@
 # Architecture
 
-The current implementation is one Rust command-line executable, `wr`, in one
-Cargo package. It loads and validates an application manifest and prints metadata.
+The current implementation is a Cargo workspace containing the `wr` executable
+and the `wasm-runner-setup` library. It loads and validates an application manifest
+and prints metadata or generates a guest workspace.
 [SPEC.md](SPEC.md) describes the implemented behavior.
 
 ## Structure
@@ -11,6 +12,16 @@ Cargo package. It loads and validates an application manifest and prints metadat
 - [manifest](src/manifest.rs) loads YAML, validates the resolved document,
   resolves module paths, checks route uniqueness, and returns application data.
 - [run](src/run.rs) coordinates loading and prints metadata.
+- [setup](src/setup.rs) coordinates loading, selects source functions, and either
+  writes the generated workspace or prints its file layout and contents for
+  `--dry-run`.
+- [wasm-runner-setup](crates/wasm-runner-setup/src/lib.rs) defines dependency
+  declarations and renders Cargo manifests. It takes validated
+  function names and dependencies and returns a sorted map of relative file paths
+  to contents without filesystem or process access. TOML serialization is handled
+  by `toml`. It rejects ambiguous global/local dependency declarations. A separate
+  writer refuses to overwrite a handwritten root Cargo manifest, creates parent
+  directories, and writes the generated files.
 
 ## Validation and errors
 
@@ -28,6 +39,16 @@ tracking is not part of the design.
 Module paths and HTTP routes are currently metadata, not executable resources.
 There is no component runtime or HTTP server. Their structure and technical
 details will be documented when implemented and established.
+
+Source functions omit the module path; manifest loading resolves their expected
+output to `.wr/components/<name>.wasm`. The generated guest workspace has one
+`cdylib` crate per source function. Its root manifest is beside the application
+manifest, separate from the host's development workspace. Member manifests stay
+under `.wr/functions`, explicitly select the application workspace, and point
+directly at source files with `lib.path`. This allows rust-analyzer to discover
+the application workspace and its source roots when opened as an editor workspace.
+Cargo maintains the guest lockfile at the application root. Setup does not produce
+WIT exports or execute builds. Removal of obsolete generated files remains future work.
 
 The checked-in [WIT world](wit/world.wit) sketches a guest interface but is not
 used by the current executable. See the [guest notes](wit/README.md).

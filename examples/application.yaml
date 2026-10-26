@@ -1,15 +1,17 @@
-# Illustrative paths: build these components before running the application.
 name: hello
+
+dependencies:
+  anyhow: "1.0"
 
 functions:
   greet:
-    module: ./build/greet.wasm
     http:
       method: GET
       path: /hello
 
   echo:
-    module: ./build/echo.wasm
+    dependencies:
+      serde_json: {version: "1.0", default-features: true}
     http:
       method: POST
       path: /echo

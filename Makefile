@@ -15,6 +15,6 @@ install:
 	cargo install --locked --path .
 
 check:
-	cargo fmt --check
-	cargo clippy --locked --all-targets -- -D warnings
-	cargo test --locked
+	cargo fmt --all --check
+	cargo clippy --locked --workspace --all-targets -- -D warnings
+	cargo test --locked --workspace

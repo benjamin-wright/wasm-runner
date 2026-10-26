@@ -6,16 +6,24 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use wasm_runner_setup::Dependencies;
 
 #[derive(Deserialize)]
 pub(crate) struct ApplicationDefinition {
     pub name: String,
+    #[serde(default)]
+    pub dependencies: Dependencies,
     pub functions: HashMap<String, FunctionDefinition>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct FunctionDefinition {
+    #[serde(default)]
     pub module: PathBuf,
+    #[serde(default)]
+    pub dependencies: Dependencies,
+    #[serde(skip)]
+    pub build_from_source: bool,
     pub http: RouteDefinition,
 }
 
@@ -64,6 +72,10 @@ pub(crate) fn load(path: &Path) -> Result<ApplicationDefinition> {
 
     let mut routes = HashSet::new();
     for (name, function) in &mut application.functions {
+        function.build_from_source = function.module.as_os_str().is_empty();
+        if function.build_from_source {
+            function.module = PathBuf::from(format!(".wr/components/{name}.wasm"));
+        }
         function.module = directory.join(&function.module);
         if !routes.insert((function.http.method, &function.http.path)) {
             bail!(

@@ -1,8 +1,9 @@
 # Guest interface sketch
 
 [`world.wit`](world.wit) defines a proposed guest interface. The current CLI
-does not use it, generate bindings, or execute components. Guest builds and
-runnable examples are not implemented.
+does not use it, generate bindings, or execute components. `wr setup` generates
+Cargo manifests pointing directly at handler source files, but these do not yet
+export this interface. Guest builds and runnable components are not implemented.
 
 The `http-function` world exports a handler that takes a request and returns a
 response. Requests contain a method, path, optional query, headers, and body.
