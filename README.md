@@ -115,8 +115,16 @@ and `/target/`. Entries are compared literally; existing patterns are not
 interpreted or reordered. Cargo maintains `Cargo.lock` beside the application
 manifest; keep that lockfile in version control.
 
+Setup also creates or updates `.vscode/settings.json`, adding
+`${workspaceFolder}/functions` to `rust-analyzer.vfs.extraIncludes` without
+duplicating it. Existing include paths, other settings, comments, and formatting
+are preserved. JSON with comments and trailing commas is supported. Invalid
+settings or an include setting that is not an array of strings cause setup to
+fail before writing files.
+
 With `--dry-run`, setup only prints the proposed file layout and contents,
-including the merged `.gitignore`, and does not write files or create directories.
+including the merged `.gitignore` and editor settings, and does not write files
+or create directories.
 Neither mode runs Cargo, installs
 prerequisites, generates lockfiles, builds WASM, packages components, or watches
 for changes. The preview is human-readable output, not an executable script.
@@ -155,13 +163,23 @@ policy, HTTP serving, and event handlers are not implemented.
 ### VS Code
 
 Run setup, then open `examples` as the VS Code workspace. Its root `Cargo.toml`
-is discoverable by rust-analyzer, and generated entry points reference
-the original handler files without `vfs.extraIncludes` settings. Remove any old
-`linkedProjects` setting pointing at `.wr/Cargo.toml`.
+is discoverable by rust-analyzer. Setup creates or updates the
+[editor settings](examples/.vscode/settings.json), adding `${workspaceFolder}/functions` to
+`rust-analyzer.vfs.extraIncludes`: the original handlers live outside the
+generated Cargo package directories, so rust-analyzer needs them explicitly
+included to resolve the generated `#[path]` modules. Cargo itself resolves these
+paths without extra configuration. `extraIncludes` requires absolute paths;
+the VS Code extension expands `${workspaceFolder}` before sending the setting
+to rust-analyzer. Bare relative paths such as `functions` are ignored.
+Remove any old `linkedProjects` setting
+pointing at `.wr/Cargo.toml`.
 
 Opening the parent repository still discovers the host workspace; to load both
 in that window, explicitly link `Cargo.toml` and `examples/Cargo.toml` using
 `rust-analyzer.linkedProjects`, or open `examples` in a separate window.
+When opening the parent repository, add `${workspaceFolder}/examples/functions` to
+`rust-analyzer.vfs.extraIncludes` in that window's settings instead; the nested
+application's editor settings do not apply to the parent workspace.
 If hover information is missing after generating the workspace, run
 **rust-analyzer: Restart server** from the Command Palette.
 

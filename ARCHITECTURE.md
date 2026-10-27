@@ -22,8 +22,10 @@ and prints metadata, generates a guest workspace, or builds HTTP components.
   declarations, discovers direct `functions/*.rs` sources, and renders Cargo manifests,
   entry points, and the embedded WIT contract. It takes validated
   function names and dependencies and returns a sorted map of relative file paths
-  to contents, including merged ignore rules read from the application's existing
-  `.gitignore`. Generation does not write files or run processes. TOML serialization is handled
+  to contents, including merged ignore rules and editor settings read from the
+  application's existing `.gitignore` and `.vscode/settings.json`.
+  `jsonc-parser` edits settings while preserving comments and formatting.
+  Generation does not write files or run processes. TOML serialization is handled
   by `toml`. It rejects ambiguous global/local dependency declarations. A separate
   writer refuses to overwrite a handwritten root Cargo manifest, creates parent
   directories, and writes changed generated files without touching identical
@@ -56,7 +58,10 @@ one `cdylib` crate per source, with explicit library names for deterministic
 artifacts. Its root manifest is beside `application.yaml`, separate from the
 host development workspace. Member manifests under `.wr/functions` explicitly
 select that workspace and point at generated entry points. These include the
-original sources as modules, so rust-analyzer can discover both.
+original sources as modules. For editor analysis, rust-analyzer also needs the
+original `functions` directory in `vfs.extraIncludes`, because it is outside the
+generated Cargo package directories. Setup merges this setting automatically;
+Cargo builds need no such setting.
 
 The setup crate embeds the checked-in [WIT world](wit/world.wit), copies it into
 the generated workspace, and supplies a managed `wit-bindgen` dependency.

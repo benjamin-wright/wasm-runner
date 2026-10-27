@@ -132,6 +132,8 @@ fn setup_previews_workspace_without_writing_files() {
         ".wr/functions/echo/Cargo.toml",
         ".wr/functions/greet/lib.rs",
         ".wr/wit/world.wit",
+        ".vscode/settings.json",
+        "${workspaceFolder}/functions",
         "workspace = true",
         "export!(Component)",
     ] {
@@ -157,6 +159,10 @@ fn setup_previews_workspace_without_writing_files() {
 
 #[test]
 fn setup_writes_the_previewed_files_beside_the_manifest_and_can_be_repeated() {
+    let expected_settings = r#"{
+  "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/functions"]
+}
+"#;
     let fixture = ManifestFixture::new(SETUP_APPLICATION);
     let preview = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
     assert!(preview.status.success());
@@ -179,6 +185,10 @@ fn setup_writes_the_previewed_files_beside_the_manifest_and_can_be_repeated() {
                 "{path}"
             );
         }
+        assert_eq!(
+            fs::read_to_string(fixture.directory.join(".vscode/settings.json")).unwrap(),
+            expected_settings
+        );
     }
 }
 
@@ -211,6 +221,102 @@ fn setup_preserves_existing_ignore_rules_and_appends_only_missing_entries() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    }
+}
+
+#[test]
+fn setup_merges_editor_settings_without_losing_existing_content() {
+    let input_without_includes = r#"{
+    // Editor preferences
+    "editor.tabSize": 4,
+}
+"#;
+    let expected_with_includes = r#"{
+    // Editor preferences
+    "editor.tabSize": 4,
+    "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/functions"],
+}
+"#;
+
+    let input_with_shared_include = r#"{
+    /* Extra source trees */
+    "rust-analyzer.vfs.extraIncludes": [
+        "${workspaceFolder}/shared", // Keep this path
+    ],
+    "editor.tabSize": 4,
+}
+"#;
+    let expected_with_both_includes = r#"{
+    /* Extra source trees */
+    "rust-analyzer.vfs.extraIncludes": [
+        "${workspaceFolder}/shared", // Keep this path
+        "${workspaceFolder}/functions",
+    ],
+    "editor.tabSize": 4,
+}
+"#;
+
+    for (input, expected) in [
+        (input_without_includes, expected_with_includes),
+        (input_with_shared_include, expected_with_both_includes),
+        (expected_with_both_includes, expected_with_both_includes),
+    ] {
+        let fixture = ManifestFixture::new(SETUP_APPLICATION);
+        fs::create_dir(fixture.directory.join(".vscode")).unwrap();
+        let path = fixture.directory.join(".vscode/settings.json");
+        fs::write(&path, input).unwrap();
+        let preview = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
+        assert!(
+            preview.status.success(),
+            "{}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        assert!(
+            String::from_utf8(preview.stdout)
+                .unwrap()
+                .contains(expected)
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
+        assert!(!fixture.directory.join("Cargo.toml").exists());
+
+        for _ in 0..2 {
+            let output = wr(&["setup", fixture.directory.to_str().unwrap()]);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn setup_rejects_invalid_editor_settings_before_writing_files() {
+    for existing in [
+        "{ invalid",
+        "[]",
+        r#"{
+    "rust-analyzer.vfs.extraIncludes": "functions"
+}"#,
+        r#"{
+    "rust-analyzer.vfs.extraIncludes": [123]
+}"#,
+    ] {
+        let fixture = ManifestFixture::new(SETUP_APPLICATION);
+        fs::create_dir(fixture.directory.join(".vscode")).unwrap();
+        let path = fixture.directory.join(".vscode/settings.json");
+        fs::write(&path, existing).unwrap();
+        for arguments in [vec!["--dry-run"], vec![]] {
+            let mut command = vec!["setup", fixture.directory.to_str().unwrap()];
+            command.extend(arguments);
+            let output = wr(&command);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains(".vscode/settings.json"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), existing);
+            assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 3);
+        }
     }
 }
 

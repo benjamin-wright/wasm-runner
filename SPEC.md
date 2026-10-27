@@ -63,6 +63,12 @@ entries from `.wr/`, `/Cargo.toml`, and `/target/`, checking for exact matching
 lines. It adds a separating newline if needed. Repeated runs do not duplicate
 these entries. Existing patterns, including negations, are not interpreted or
 reordered. No ignore entry is added for `Cargo.lock`.
+Setup also creates or merges `.vscode/settings.json`, adding
+`${workspaceFolder}/functions` to `rust-analyzer.vfs.extraIncludes` if absent.
+Existing include paths and unrelated settings are retained, along with comments
+and formatting. JSON comments and trailing commas are supported. Invalid editor
+settings or an include setting that is not an array of strings are rejected
+before any writes. Repeated runs do not duplicate the include path.
 Existing files that are not
 part of the generated output are left alone, including obsolete function
 directories, build artifacts, and lockfiles. Success reports the workspace path.
@@ -84,7 +90,7 @@ transactional, so earlier files can have been written when a later write fails.
 
 With `--dry-run`, setup only writes stdout: it prints file paths in sorted
 order, followed by their contents in the same order, including the merged
-`.gitignore`, without creating files or directories. Validation and generation
+`.gitignore` and editor settings, without creating files or directories. Validation and generation
 errors produce no preview output.
 
 Neither mode reads source contents, invokes Cargo, generates or synchronizes
