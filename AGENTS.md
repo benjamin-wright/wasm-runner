@@ -4,6 +4,12 @@ Apply these instructions when planning, implementing, testing, and reviewing
 changes. Treat preferences as defaults; explain material tradeoffs that require
 a departure. Keep the work within the user's requested scope.
 
+## Working Process
+
+Avoid interacting with Git directly, trust the user to have set up the environment
+to disambiguate your changes from any existing work. If you do need some information
+from Git, ask the user, you won't have access to those tools yourself.
+
 ## Decision points
 
 Read and apply the linked skill when its condition holds. Both skills may apply
