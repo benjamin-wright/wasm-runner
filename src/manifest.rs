@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt, fs,
-    path::{Path, PathBuf, absolute},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use wasm_runner_setup::Dependencies;
+
+const APPLICATION_SCHEMA: &str = include_str!("../application.schema.json");
 
 #[derive(Deserialize)]
 pub(crate) struct ApplicationDefinition {
@@ -18,12 +20,10 @@ pub(crate) struct ApplicationDefinition {
 
 #[derive(Deserialize)]
 pub(crate) struct FunctionDefinition {
-    #[serde(default)]
+    #[serde(skip)]
     pub module: PathBuf,
     #[serde(default)]
     pub dependencies: Dependencies,
-    #[serde(skip)]
-    pub build_from_source: bool,
     pub http: RouteDefinition,
 }
 
@@ -59,30 +59,38 @@ impl fmt::Display for HttpMethod {
     }
 }
 
-pub(crate) fn load(path: &Path) -> Result<ApplicationDefinition> {
-    let source =
-        fs::read_to_string(path).with_context(|| format!("reading manifest {}", path.display()))?;
+pub(crate) fn load(directory: &Path) -> Result<ApplicationDefinition> {
+    let path = directory.join("application.yaml");
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("reading manifest {}", path.display()))?;
     let mut application =
         parse(&source).with_context(|| format!("parsing manifest {}", path.display()))?;
-    let manifest_path =
-        absolute(path).with_context(|| format!("resolving manifest path {}", path.display()))?;
-    let directory = manifest_path
-        .parent()
-        .expect("a successfully read manifest file has a parent directory");
-
     let mut routes = HashSet::new();
     for (name, function) in &mut application.functions {
-        function.build_from_source = function.module.as_os_str().is_empty();
-        if function.build_from_source {
-            function.module = PathBuf::from(format!(".wr/components/{name}.wasm"));
-        }
-        function.module = directory.join(&function.module);
+        function.module = directory.join(format!(".wr/components/{name}.wasm"));
         if !routes.insert((function.http.method, &function.http.path)) {
             bail!(
                 "{}: /functions/{name}/http: duplicate method/path pair ({} {})",
                 path.display(),
                 function.http.method,
                 function.http.path
+            );
+        }
+    }
+    for name in application.functions.keys() {
+        let source = directory.join("functions").join(format!("{name}.rs"));
+        let metadata = fs::metadata(&source).with_context(|| {
+            format!(
+                "{}: reading function source {}",
+                path.display(),
+                source.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            bail!(
+                "{}: function source {} is not a file",
+                path.display(),
+                source.display()
             );
         }
     }
@@ -98,7 +106,7 @@ fn parse(source: &str) -> Result<ApplicationDefinition> {
 }
 
 fn validate_schema(value: &serde_json::Value) -> Result<()> {
-    let schema = serde_json::from_str(include_str!("../application.schema.json"))
+    let schema = serde_json::from_str(APPLICATION_SCHEMA)
         .expect("embedded application schema must be valid JSON");
     let validator =
         jsonschema::validator_for(&schema).expect("embedded application schema must be valid");

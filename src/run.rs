@@ -4,14 +4,21 @@ use std::{
     path::Path,
 };
 
-use crate::manifest;
+use crate::manifest::ApplicationDefinition;
 use anyhow::Result;
 
-pub(crate) fn run(manifest_path: &Path, listen: SocketAddr) -> Result<()> {
-    let application = manifest::load(manifest_path)?;
+pub(crate) fn run(
+    directory: &Path,
+    application: &ApplicationDefinition,
+    listen: SocketAddr,
+) -> Result<()> {
     let mut output = io::stdout().lock();
     writeln!(output, "Application: {}", application.name)?;
-    writeln!(output, "Manifest: {}", manifest_path.display())?;
+    writeln!(
+        output,
+        "Manifest: {}",
+        directory.join("application.yaml").display()
+    )?;
     writeln!(output, "Configured listener: {listen}")?;
     writeln!(output, "Functions: {}", application.functions.len())?;
     let mut functions: Vec<_> = application.functions.iter().collect();

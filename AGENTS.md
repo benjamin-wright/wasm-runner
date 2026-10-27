@@ -31,6 +31,11 @@ Use descriptive names, sensible whitespace, and straightforward control flow.
 Keep comments sparse: explain non-obvious reasons or constraints without
 narrating the code.
 
+Embed bundled text assets with `include_str!` rather than reading them from disk
+at runtime. Declare embeddings as descriptively named module-level `const` values
+near the top of the file, after imports, rather than referencing them inline.
+Apply the same convention to test fixtures.
+
 Give abstractions cohesive responsibilities and separate orchestration from
 implementation details. Choose the smallest coherent solution: fewer concepts
 and clearer reasoning, without compressed code or speculative generalization.

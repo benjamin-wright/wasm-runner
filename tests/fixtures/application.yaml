@@ -2,13 +2,11 @@ name: hello
 
 functions:
   greet:
-    module: ./build/greet.wasm
     http:
       method: GET
       path: /hello
 
   echo:
-    module: ./build/echo.wasm
     http:
       method: POST
       path: /echo

@@ -1,3 +1,9 @@
-pub fn handle(_body: &[u8]) -> anyhow::Result<Vec<u8>> {
-    Ok(b"Hello, world!".to_vec())
+use crate::{Request, Response};
+
+pub fn handle(_request: Request) -> Response {
+    Response {
+        status: 200,
+        headers: vec![("content-type".into(), "text/plain".into())],
+        body: b"Hello, world!".to_vec(),
+    }
 }

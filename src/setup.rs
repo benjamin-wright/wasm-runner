@@ -6,20 +6,15 @@ use std::{
 
 use anyhow::Result;
 
-use crate::manifest;
+use crate::manifest::ApplicationDefinition;
 
-pub(crate) fn setup(path: &Path, dry_run: bool) -> Result<()> {
-    let application = manifest::load(path)?;
-    let functions: BTreeMap<_, _> = application
-        .functions
-        .iter()
-        .filter(|(_, function)| function.build_from_source)
-        .map(|(name, function)| (name.clone(), &function.dependencies))
-        .collect();
-    let directory = path
-        .parent()
-        .expect("a successfully read manifest file has a parent directory");
-    let files = wasm_runner_setup::generate(directory, &application.dependencies, &functions)?;
+pub(crate) fn setup(
+    directory: &Path,
+    application: &ApplicationDefinition,
+    dry_run: bool,
+) -> Result<()> {
+    let functions = wasm_runner_setup::discover_functions(directory)?;
+    let files = workspace_files(directory, application, &functions)?;
 
     if dry_run {
         return print_preview(&application.name, &files);
@@ -34,13 +29,29 @@ pub(crate) fn setup(path: &Path, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn workspace_files(
+    directory: &Path,
+    application: &ApplicationDefinition,
+    function_names: &[String],
+) -> Result<BTreeMap<String, String>> {
+    let empty = BTreeMap::new();
+    let functions = function_names
+        .iter()
+        .map(|name| {
+            let dependencies = application
+                .functions
+                .get(name)
+                .map_or(&empty, |function| &function.dependencies);
+            (name.clone(), dependencies)
+        })
+        .collect();
+    wasm_runner_setup::generate(directory, &application.dependencies, &functions)
+}
+
 fn print_preview(name: &str, files: &BTreeMap<String, String>) -> Result<()> {
     let mut output = io::stdout().lock();
     writeln!(output, "Workspace preview for {name}")?;
-    writeln!(
-        output,
-        "Paths are relative to the application manifest directory."
-    )?;
+    writeln!(output, "Paths are relative to the application directory.")?;
     writeln!(
         output,
         "Preview only; no files are written and Cargo is not invoked.\n"

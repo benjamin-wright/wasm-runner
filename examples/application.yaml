@@ -1,8 +1,5 @@
 name: hello
 
-dependencies:
-  anyhow: "1.0"
-
 functions:
   greet:
     http:
