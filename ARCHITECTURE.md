@@ -3,19 +3,21 @@
 The current implementation is a Cargo workspace containing the `wr` executable
 and the `wasm-runner-setup` library. It loads and validates an application manifest
 and prints metadata, generates a guest workspace, or builds HTTP components.
+It also cleans generated workspaces and build outputs without loading a manifest.
 [SPEC.md](SPEC.md) describes the implemented behavior.
 
 ## Structure
 
 - [main](src/main.rs) resolves the application directory, loads `application.yaml`
-  once, passes the application to command handlers, and reports failures.
+  once for setup, build, and run, passes it to command handlers, and reports failures.
+  Clean bypasses manifest loading so broken applications can still be cleaned.
 - [cli](src/cli.rs) defines command-line arguments using `clap`.
 - [manifest](src/manifest.rs) loads YAML, validates the resolved document,
   resolves module paths, checks route uniqueness, and returns application data.
 - [run](src/run.rs) prints metadata without executing components.
 - [setup](src/setup.rs) selects discovered function dependencies and either
   writes the generated workspace or prints its file layout and contents for
-  `--dry-run`.
+  `--dry-run`. It also delegates clean to the workspace library.
 - [build](src/build.rs) refreshes the generated workspace, invokes Cargo once,
   and publishes components from deterministic target/profile/library paths.
 - [wasm-runner-setup](crates/wasm-runner-setup/src/lib.rs) defines dependency
@@ -32,6 +34,10 @@ and prints metadata, generates a guest workspace, or builds HTTP components.
   files. A private helper appends missing
   literal ignore entries in memory; generation includes this content in the same
   file map used for previewing and writing.
+  Cleanup removes only `.wr`, `target`, and the generated root Cargo manifest,
+  checking the manifest's ownership marker before any removals. It preserves
+  lockfiles and user configuration and unlinks directory symlinks without
+  following them.
 
 ## Validation and errors
 

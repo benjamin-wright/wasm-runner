@@ -48,6 +48,16 @@ pub(crate) fn workspace_files(
     wasm_runner_setup::generate(directory, &application.dependencies, &functions)
 }
 
+pub(crate) fn clean(directory: &Path) -> Result<()> {
+    wasm_runner_setup::clean_workspace(directory)?;
+    writeln!(
+        io::stdout().lock(),
+        "Workspace cleaned in {}",
+        directory.display()
+    )?;
+    Ok(())
+}
+
 fn print_preview(name: &str, files: &BTreeMap<String, String>) -> Result<()> {
     let mut output = io::stdout().lock();
     writeln!(output, "Workspace preview for {name}")?;

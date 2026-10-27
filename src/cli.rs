@@ -35,6 +35,12 @@ pub(crate) enum Command {
         #[arg(long)]
         locked: bool,
     },
+    /// Remove generated workspace files and build outputs, preserving user configuration
+    Clean {
+        /// Application directory to clean
+        #[arg(value_name = "DIRECTORY")]
+        directory: PathBuf,
+    },
     /// Load an application YAML manifest and print metadata (serving not yet implemented)
     Run {
         /// Application directory containing application.yaml

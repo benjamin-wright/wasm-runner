@@ -106,6 +106,7 @@ fn invalid_invocations_are_rejected() {
         vec!["run"],
         vec!["setup"],
         vec!["build"],
+        vec!["clean"],
         vec!["run", "application.yaml", "--listen"],
         vec!["run", "application.yaml", "--listen", "localhost:9000"],
         vec!["run", "application.yaml", "--listen", "127.0.0.1:65536"],
@@ -355,6 +356,147 @@ fn setup_rejects_invalid_dependencies_without_partial_output() {
         assert!(output.stdout.is_empty());
         assert!(!output.stderr.is_empty());
         assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn clean_removes_generated_files_and_preserves_user_files() {
+    let fixture = ManifestFixture::new(SETUP_APPLICATION);
+    let output = wr(&["setup", fixture.directory.to_str().unwrap()]);
+    assert!(output.status.success());
+    fs::create_dir_all(fixture.directory.join("target/wasm32-wasip2/debug")).unwrap();
+    fs::write(
+        fixture
+            .directory
+            .join("target/wasm32-wasip2/debug/greet.wasm"),
+        b"build output",
+    )
+    .unwrap();
+    fs::write(
+        fixture.directory.join(".wr/obsolete.wasm"),
+        b"old component",
+    )
+    .unwrap();
+    fs::write(
+        fixture.directory.join("Cargo.lock"),
+        "application lockfile\n",
+    )
+    .unwrap();
+    let preserved: Vec<_> = [
+        "application.yaml",
+        "functions/greet.rs",
+        "functions/echo.rs",
+        "Cargo.lock",
+        ".gitignore",
+        ".vscode/settings.json",
+    ]
+    .into_iter()
+    .map(|name| (name, fs::read(fixture.directory.join(name)).unwrap()))
+    .collect();
+
+    for _ in 0..2 {
+        let output = wr(&["clean", fixture.directory.to_str().unwrap()]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for name in [".wr", "target", "Cargo.toml"] {
+            assert!(!fixture.directory.join(name).exists(), "{name}");
+        }
+        for (name, contents) in &preserved {
+            assert_eq!(
+                fs::read(fixture.directory.join(name)).unwrap(),
+                *contents,
+                "{name}"
+            );
+        }
+    }
+
+    let output = wr(&["setup", fixture.directory.to_str().unwrap()]);
+    assert!(output.status.success());
+    assert!(
+        fixture
+            .directory
+            .join(".wr/functions/greet/lib.rs")
+            .is_file()
+    );
+}
+
+#[test]
+fn clean_refuses_a_handwritten_cargo_manifest_before_removing_anything() {
+    let handwritten = r#"[workspace]
+members = []
+"#;
+    let fixture = ManifestFixture::new(EXAMPLE);
+    fs::write(fixture.directory.join("Cargo.toml"), handwritten).unwrap();
+    for name in [".wr", "target"] {
+        fs::create_dir(fixture.directory.join(name)).unwrap();
+        fs::write(fixture.directory.join(name).join("keep.txt"), "keep\n").unwrap();
+    }
+
+    let output = wr(&["clean", fixture.directory.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to remove"));
+    assert_eq!(
+        fs::read_to_string(fixture.directory.join("Cargo.toml")).unwrap(),
+        handwritten
+    );
+    for name in [".wr", "target"] {
+        assert_eq!(
+            fs::read_to_string(fixture.directory.join(name).join("keep.txt")).unwrap(),
+            "keep\n"
+        );
+    }
+}
+
+#[test]
+fn clean_does_not_require_a_valid_manifest_or_function_sources() {
+    for manifest in [Some("invalid: ["), None] {
+        let fixture = ManifestFixture::new(EXAMPLE);
+        let output = wr(&["setup", fixture.directory.to_str().unwrap()]);
+        assert!(output.status.success());
+        match manifest {
+            Some(contents) => fs::write(&fixture.path, contents).unwrap(),
+            None => fs::remove_file(&fixture.path).unwrap(),
+        }
+        fs::remove_dir_all(fixture.directory.join("functions")).unwrap();
+
+        let output = wr(&["clean", fixture.directory.to_str().unwrap()]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!fixture.directory.join(".wr").exists());
+        assert!(!fixture.directory.join("Cargo.toml").exists());
+        assert_eq!(fs::read_to_string(&fixture.path).ok().as_deref(), manifest);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_removes_directory_symlinks_without_following_them() {
+    let fixture = ManifestFixture::new(EXAMPLE);
+    let outside = ManifestFixture::new(EXAMPLE);
+    for name in [".wr", "target"] {
+        std::os::unix::fs::symlink(&outside.directory, fixture.directory.join(name)).unwrap();
+    }
+
+    let output = wr(&["clean", fixture.directory.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&outside.path).unwrap(), EXAMPLE);
+    assert_eq!(
+        fs::read_to_string(outside.directory.join("functions/greet.rs")).unwrap(),
+        GREET_FUNCTION
+    );
+    for name in [".wr", "target"] {
+        assert!(fs::symlink_metadata(fixture.directory.join(name)).is_err());
     }
 }
 

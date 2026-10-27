@@ -27,21 +27,30 @@ fn execute(command: Command) -> Result<()> {
     let directory = match &command {
         Command::Setup { directory, .. }
         | Command::Build { directory, .. }
+        | Command::Clean { directory }
         | Command::Run { directory, .. } => directory,
     };
     let directory = absolute(directory)
         .with_context(|| format!("resolving application directory {}", directory.display()))?;
-    let application = manifest::load(&directory)?;
-
     match command {
-        Command::Setup { dry_run, .. } => setup::setup(&directory, &application, dry_run),
+        Command::Setup { dry_run, .. } => {
+            let application = manifest::load(&directory)?;
+            setup::setup(&directory, &application, dry_run)
+        }
         Command::Build {
             release, locked, ..
-        } => build::build(
-            &directory,
-            &application,
-            &build::BuildOptions { release, locked },
-        ),
-        Command::Run { listen, .. } => run::run(&directory, &application, listen),
+        } => {
+            let application = manifest::load(&directory)?;
+            build::build(
+                &directory,
+                &application,
+                &build::BuildOptions { release, locked },
+            )
+        }
+        Command::Clean { .. } => setup::clean(&directory),
+        Command::Run { listen, .. } => {
+            let application = manifest::load(&directory)?;
+            run::run(&directory, &application, listen)
+        }
     }
 }
