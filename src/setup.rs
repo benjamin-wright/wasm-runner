@@ -16,15 +16,15 @@ pub(crate) fn setup(path: &Path, dry_run: bool) -> Result<()> {
         .filter(|(_, function)| function.build_from_source)
         .map(|(name, function)| (name.clone(), &function.dependencies))
         .collect();
-    let files = wasm_runner_setup::generate(&application.dependencies, &functions)?;
+    let directory = path
+        .parent()
+        .expect("a successfully read manifest file has a parent directory");
+    let files = wasm_runner_setup::generate(directory, &application.dependencies, &functions)?;
 
     if dry_run {
         return print_preview(&application.name, &files);
     }
 
-    let directory = path
-        .parent()
-        .expect("a successfully read manifest file has a parent directory");
     wasm_runner_setup::write_workspace(directory, &files)?;
     writeln!(
         io::stdout().lock(),

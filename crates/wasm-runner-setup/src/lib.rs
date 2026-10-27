@@ -26,8 +26,10 @@ pub struct DependencyDetails {
 }
 
 /// Render workspace files, relative to the application's directory.
+/// Read existing ignore entries and include the merged `.gitignore` contents.
 /// Source files remain in the application's `functions` directory.
 pub fn generate(
+    directory: &Path,
     common: &Dependencies,
     functions: &BTreeMap<String, &Dependencies>,
 ) -> Result<BTreeMap<String, String>> {
@@ -47,7 +49,30 @@ pub fn generate(
             render_function_manifest(name, dependencies)?,
         );
     }
+    files.insert(".gitignore".to_owned(), generate_gitignore(directory)?);
     Ok(files)
+}
+
+/// Preserve existing ignore entries and append missing rules for setup and build output.
+fn generate_gitignore(directory: &Path) -> Result<String> {
+    let path = directory.join(".gitignore");
+    let mut contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+
+    for rule in [".wr/", "/Cargo.toml", "/target/"] {
+        if contents.lines().any(|line| line == rule) {
+            continue;
+        }
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str(rule);
+        contents.push('\n');
+    }
+    Ok(contents)
 }
 
 /// Write generated files, creating their parent directories and replacing existing contents.

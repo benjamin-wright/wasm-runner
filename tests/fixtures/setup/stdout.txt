@@ -2,9 +2,16 @@ Workspace preview for hello
 Paths are relative to the application manifest directory.
 Preview only; no files are written and Cargo is not invoked.
 
+.gitignore
 .wr/functions/echo/Cargo.toml
 .wr/functions/greet/Cargo.toml
 Cargo.toml
+
+=== .gitignore ===
+.wr/
+/Cargo.toml
+/target/
+
 
 === .wr/functions/echo/Cargo.toml ===
 [dependencies]

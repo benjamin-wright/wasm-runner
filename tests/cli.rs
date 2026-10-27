@@ -145,6 +145,38 @@ fn setup_writes_the_previewed_files_beside_the_manifest_and_can_be_repeated() {
 }
 
 #[test]
+fn setup_preserves_existing_ignore_rules_and_appends_only_missing_entries() {
+    let fixture = ManifestFixture::new(include_str!("fixtures/setup/application.yaml"));
+    let path = fixture.directory.join(".gitignore");
+    let existing = "# Local files\r\n.env\r\n/target/";
+    let expected = "# Local files\r\n.env\r\n/target/\n.wr/\n/Cargo.toml\n";
+    fs::write(&path, existing).unwrap();
+
+    let output = wr(&["setup", fixture.path.to_str().unwrap(), "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains(&format!("=== .gitignore ===\n{expected}\n"))
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), existing);
+    assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 2);
+
+    for _ in 0..2 {
+        let output = wr(&["setup", fixture.path.to_str().unwrap()]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    }
+}
+
+#[test]
 fn setup_preserves_an_existing_handwritten_cargo_manifest() {
     let fixture = ManifestFixture::new(include_str!("fixtures/setup/application.yaml"));
     let path = fixture.directory.join("Cargo.toml");
@@ -157,6 +189,7 @@ fn setup_preserves_an_existing_handwritten_cargo_manifest() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite"));
     assert_eq!(fs::read_to_string(path).unwrap(), handwritten);
     assert!(!fixture.directory.join(".wr").exists());
+    assert!(!fixture.directory.join(".gitignore").exists());
 }
 
 #[test]

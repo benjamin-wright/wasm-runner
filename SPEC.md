@@ -48,7 +48,13 @@ build; setup does not resolve dependencies.
 workspace rooted beside the application manifest, with member manifests under
 `.wr/functions/<name>`. It creates parent directories and overwrites the
 generated files. A root `Cargo.toml` without the setup-generated header is
-rejected before any writes. Existing files that are not
+rejected before any writes. Setup also creates or updates `.gitignore` beside
+the application manifest. It preserves existing contents and appends missing
+entries from `.wr/`, `/Cargo.toml`, and `/target/`, checking for exact matching
+lines. It adds a separating newline if needed. Repeated runs do not duplicate
+these entries. Existing patterns, including negations, are not interpreted or
+reordered. No ignore entry is added for `Cargo.lock`.
+Existing files that are not
 part of the generated output are left alone, including obsolete function
 directories, build artifacts, and lockfiles. Success reports the workspace path.
 It includes a root Cargo manifest and a `cdylib` package manifest for each source
@@ -65,8 +71,9 @@ filesystem changes. Filesystem errors include the failing path; writes are not
 transactional, so earlier files can have been written when a later write fails.
 
 With `--dry-run`, setup only writes stdout: it prints file paths in sorted
-order, followed by their contents in the same order, without creating files or
-directories. Validation and generation errors produce no preview output.
+order, followed by their contents in the same order, including the merged
+`.gitignore`, without creating files or directories. Validation and generation
+errors produce no preview output.
 
 Neither mode reads source files, invokes Cargo, generates or synchronizes
 lockfiles, or watches changes.

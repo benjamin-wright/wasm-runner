@@ -86,13 +86,15 @@ files when run again. It refuses to overwrite a root `Cargo.toml` unless it has
 the generated-file header written by setup. Other files are left alone, including
 old generated wrappers and manifests. Member manifests explicitly select the
 application workspace, so an old `.wr/Cargo.toml` is not used.
-The example ignores `.wr`, the generated root `Cargo.toml`, and `target` in
-version control. Cargo now maintains `Cargo.lock` beside the application manifest;
-keep that lockfile in version control. Add the same ignore rules when using
-setup in another project.
+Setup creates or updates `.gitignore` beside the application manifest, preserving
+existing contents and appending any missing entries from `.wr/`, `/Cargo.toml`,
+and `/target/`. Entries are compared literally; existing patterns are not
+interpreted or reordered. Cargo maintains `Cargo.lock` beside the application
+manifest; keep that lockfile in version control.
 
-With `--dry-run`, setup only prints the proposed file layout and contents and
-does not write files or create directories. Neither mode runs Cargo, installs
+With `--dry-run`, setup only prints the proposed file layout and contents,
+including the merged `.gitignore`, and does not write files or create directories.
+Neither mode runs Cargo, installs
 prerequisites, generates lockfiles, builds WASM, packages components, or watches
 for changes. The preview is human-readable output, not an executable script.
 `make setup` remains the separate command for setting up this repository's Rust

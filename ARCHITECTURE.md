@@ -18,10 +18,13 @@ and prints metadata or generates a guest workspace.
 - [wasm-runner-setup](crates/wasm-runner-setup/src/lib.rs) defines dependency
   declarations and renders Cargo manifests. It takes validated
   function names and dependencies and returns a sorted map of relative file paths
-  to contents without filesystem or process access. TOML serialization is handled
+  to contents, including merged ignore rules read from the application's existing
+  `.gitignore`. Generation does not write files or run processes. TOML serialization is handled
   by `toml`. It rejects ambiguous global/local dependency declarations. A separate
   writer refuses to overwrite a handwritten root Cargo manifest, creates parent
-  directories, and writes the generated files.
+  directories, and writes the generated files. A private helper appends missing
+  literal ignore entries in memory; generation includes this content in the same
+  file map used for previewing and writing.
 
 ## Validation and errors
 
