@@ -1,14 +1,32 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt, fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
-use wasm_runner_setup::Dependencies;
+use serde::{Deserialize, Serialize};
 
-const APPLICATION_SCHEMA: &str = include_str!("../application.schema.json");
+const APPLICATION_SCHEMA: &str = include_str!("../../application.schema.json");
+
+pub(crate) type Dependencies = BTreeMap<String, Dependency>;
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum Dependency {
+    Version(String),
+    Detailed(DependencyDetails),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub(crate) struct DependencyDetails {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_features: Option<bool>,
+}
 
 #[derive(Deserialize)]
 pub(crate) struct ApplicationDefinition {

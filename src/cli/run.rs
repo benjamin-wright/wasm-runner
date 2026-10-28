@@ -1,13 +1,35 @@
 use std::{
     io::{self, Write},
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
-use crate::manifest::ApplicationDefinition;
 use anyhow::Result;
+use clap::Args;
 
-pub(crate) fn run(
+use crate::services::manifest::{self, ApplicationDefinition};
+
+/// Load an application YAML manifest and print metadata (serving not yet implemented)
+#[derive(Args)]
+pub(super) struct Run {
+    /// Application directory containing application.yaml
+    #[arg(value_name = "DIRECTORY")]
+    directory: PathBuf,
+
+    /// Numeric IP address and port to listen on
+    #[arg(long, value_name = "IP:PORT", default_value = "127.0.0.1:8080")]
+    listen: SocketAddr,
+}
+
+impl Run {
+    pub(super) fn execute(self) -> Result<()> {
+        let directory = super::resolve_directory(&self.directory)?;
+        let application = manifest::load(&directory)?;
+        print_metadata(&directory, &application, self.listen)
+    }
+}
+
+fn print_metadata(
     directory: &Path,
     application: &ApplicationDefinition,
     listen: SocketAddr,

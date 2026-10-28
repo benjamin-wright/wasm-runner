@@ -240,21 +240,25 @@ Dependency updates are separate from setup: run `make update-deps` only to
 deliberately refresh dependency versions, then review and commit the result.
 Build, install, and check use `--locked` and never update the lockfile.
 
-Argument definitions live in [src/cli.rs](src/cli.rs); command dispatch and error reporting
-live in [src/main.rs](src/main.rs). Manifest loading and validation live in
-[src/manifest.rs](src/manifest.rs), which parses YAML with `yaml_serde`, validates
-the resolved data with `jsonschema`, and deserializes directly into the returned
-application types. Its `load` function resolves module paths and checks route
-uniqueness and source-file existence before returning the application.
-[src/run.rs](src/run.rs) prints metadata and is the entry point for future
-application preparation and serving. [src/setup.rs](src/setup.rs) coordinates
-generation, selects writing or previewing, and delegates cleanup. The separate
-[wasm-runner-setup crate](crates/wasm-runner-setup) renders workspace and member
-manifests, WIT definitions, and entry points and writes them through a separate
-filesystem function. It also removes generated workspace files and build outputs.
-[src/build.rs](src/build.rs) invokes Cargo and publishes components at deterministic
-paths. Setup, build, and run receive the already-loaded application and its
-directory; clean receives only the directory.
+The CLI is a single Rust package. [src/main.rs](src/main.rs) invokes the CLI,
+reports errors, and returns an exit status. [src/cli/mod.rs](src/cli/mod.rs)
+owns the top-level parser and dispatch. Each command keeps its arguments,
+workflow, and presentation together in [src/cli](src/cli):
+[setup](src/cli/setup.rs), [build](src/cli/build.rs),
+[clean](src/cli/clean.rs), and [run](src/cli/run.rs).
+
+Implementation lives in [src/services](src/services), independent of CLI types
+and presentation. The [manifest service](src/services/manifest.rs) owns
+application and dependency types, parses YAML with `yaml_serde`, validates
+resolved data with `jsonschema`, resolves module paths, and checks route
+uniqueness and source-file existence. The [workspace service](src/services/workspace.rs)
+discovers sources, selects dependencies, renders workspace files, and writes or
+cleans generated files. The [build service](src/services/build.rs) invokes Cargo
+and publishes components at deterministic paths. Services return results for
+the CLI to present; Cargo's own diagnostics are inherited directly.
+
+Setup, build, and run load the application within their command workflows.
+Clean only needs the directory, so it can operate without a valid manifest.
 
 ## Design
 

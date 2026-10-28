@@ -956,23 +956,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jsonc-parser",
  "jsonschema",
  "serde",
  "serde_json",
- "wasm-runner-setup",
+ "toml",
  "wit-component",
  "yaml_serde",
-]
-
-[[package]]
-name = "wasm-runner-setup"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jsonc-parser",
- "serde",
- "serde_json",
- "toml",
 ]
 
 [[package]]

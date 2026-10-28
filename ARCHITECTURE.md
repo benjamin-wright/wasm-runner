@@ -1,29 +1,34 @@
 # Architecture
 
-The current implementation is a Cargo workspace containing the `wr` executable
-and the `wasm-runner-setup` library. It loads and validates an application manifest
+The current implementation is a single Rust package containing the `wr` executable.
+It loads and validates an application manifest
 and prints metadata, generates a guest workspace, or builds HTTP components.
 It also cleans generated workspaces and build outputs without loading a manifest.
 [SPEC.md](SPEC.md) describes the implemented behavior.
 
 ## Structure
 
-- [main](src/main.rs) resolves the application directory, loads `application.yaml`
-  once for setup, build, and run, passes it to command handlers, and reports failures.
-  Clean bypasses manifest loading so broken applications can still be cleaned.
-- [cli](src/cli.rs) defines command-line arguments using `clap`.
-- [manifest](src/manifest.rs) loads YAML, validates the resolved document,
-  resolves module paths, checks route uniqueness, and returns application data.
-- [run](src/run.rs) prints metadata without executing components.
-- [setup](src/setup.rs) selects discovered function dependencies and either
-  writes the generated workspace or prints its file layout and contents for
-  `--dry-run`. It also delegates clean to the workspace library.
-- [build](src/build.rs) refreshes the generated workspace, invokes Cargo once,
-  and publishes components from deterministic target/profile/library paths.
-- [wasm-runner-setup](crates/wasm-runner-setup/src/lib.rs) defines dependency
-  declarations, discovers direct `functions/*.rs` sources, and renders Cargo manifests,
-  entry points, and the embedded WIT contract. It takes validated
-  function names and dependencies and returns a sorted map of relative file paths
+- [main](src/main.rs) invokes the CLI, reports failures, and returns an exit status.
+- [cli](src/cli/mod.rs) defines the top-level parser and command dispatch, with a
+  shared helper for resolving application directories. Each command module owns
+  its arguments, workflow, and presentation:
+  [setup](src/cli/setup.rs) previews or writes a generated workspace;
+  [build](src/cli/build.rs) refreshes the workspace, compiles it, publishes
+  components, and reports their paths; [clean](src/cli/clean.rs) removes generated
+  files; [run](src/cli/run.rs) loads and prints application metadata.
+  Setup, build, and run load the manifest once within their workflows. Clean does
+  not load it, so broken applications can still be cleaned.
+- [services](src/services/mod.rs) supplies operations independent of CLI argument
+  types and presentation. Services return data or errors and never depend on the
+  CLI. Cargo's own diagnostics are inherited directly during compilation.
+- [manifest](src/services/manifest.rs) owns application and dependency declaration
+  types, loads YAML, validates the resolved document, resolves module paths,
+  checks route uniqueness and source-file existence, and returns application data.
+- [build](src/services/build.rs) invokes Cargo and publishes components from
+  deterministic target/profile/library paths, returning the published paths.
+- [workspace](src/services/workspace.rs) discovers direct `functions/*.rs` sources,
+  selects their dependencies from the application, and renders Cargo manifests,
+  entry points, and the embedded WIT contract. It returns a sorted map of relative file paths
   to contents, including merged ignore rules and editor settings read from the
   application's existing `.gitignore` and `.vscode/settings.json`.
   `jsonc-parser` edits settings while preserving comments and formatting.
@@ -69,7 +74,7 @@ original `functions` directory in `vfs.extraIncludes`, because it is outside the
 generated Cargo package directories. Setup merges this setting automatically;
 Cargo builds need no such setting.
 
-The setup crate embeds the checked-in [WIT world](wit/world.wit), copies it into
+The workspace service embeds the checked-in [WIT world](wit/world.wit), copies it into
 the generated workspace, and supplies a managed `wit-bindgen` dependency.
 Generated entry points implement the WIT-exported handler trait and expose
 `Request` and `Response` at the crate root. User handlers return those types
@@ -78,7 +83,7 @@ directly; no parallel request/response model or conversion layer is introduced.
 Build uses ordinary Cargo targeting `wasm32-wasip2`, an explicit application-local
 target directory, and debug or release profile. Cargo owns dependency resolution,
 incremental compilation, concurrency, diagnostics, and the application lockfile.
-The build command computes artifact locations rather than parsing JSON messages,
+The build service computes artifact locations rather than parsing JSON messages,
 and copies all expected outputs only after Cargo succeeds and every artifact
 exists. Writes and publication are not transactional. Obsolete generated files
 and components remain untouched.
