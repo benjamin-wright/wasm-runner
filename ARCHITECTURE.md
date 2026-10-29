@@ -1,95 +1,113 @@
 # Architecture
 
-The current implementation is a single Rust package containing the `wr` executable.
-It loads and validates an application manifest
-and prints metadata, generates a guest workspace, or builds HTTP components.
-It also cleans generated workspaces and build outputs without loading a manifest.
-[SPEC.md](SPEC.md) describes the implemented behavior.
+This page explains the current runner's responsibilities and design choices.
+[Requirements](SPEC.md) state the outcomes; the [reference](docs/reference.md)
+defines exact public behavior. Contributor commands and verification practices
+live in [Contributing](CONTRIBUTING.md).
 
 ## Structure
 
-- [main](src/main.rs) invokes the CLI, reports failures, and returns an exit status.
-- [cli](src/cli/mod.rs) defines the top-level parser and command dispatch, with a
-  shared helper for resolving application directories. Each command module owns
-  its arguments, workflow, and presentation:
-  [setup](src/cli/setup.rs) previews or writes a generated workspace;
-  [build](src/cli/build.rs) refreshes the workspace, compiles it, publishes
-  components, and reports their paths; [clean](src/cli/clean.rs) removes generated
-  files; [run](src/cli/run.rs) loads and prints application metadata.
-  Setup, build, and run load the manifest once within their workflows. Clean does
-  not load it, so broken applications can still be cleaned.
-- [services](src/services/mod.rs) supplies operations independent of CLI argument
-  types and presentation. Services return data or errors and never depend on the
-  CLI. Cargo's own diagnostics are inherited directly during compilation.
-- [manifest](src/services/manifest.rs) owns application and dependency declaration
-  types, loads YAML, validates the resolved document, resolves module paths,
-  checks route uniqueness and source-file existence, and returns application data.
-- [build](src/services/build.rs) invokes Cargo and publishes components from
-  deterministic target/profile/library paths, returning the published paths.
-- [workspace](src/services/workspace.rs) discovers direct `functions/*.rs` sources,
-  selects their dependencies from the application, and renders Cargo manifests,
-  entry points, and the embedded WIT contract. It returns a sorted map of relative file paths
-  to contents, including merged ignore rules and editor settings read from the
-  application's existing `.gitignore` and `.vscode/settings.json`.
-  `jsonc-parser` edits settings while preserving comments and formatting.
-  Generation does not write files or run processes. TOML serialization is handled
-  by `toml`. It rejects ambiguous global/local dependency declarations. A separate
-  writer refuses to overwrite a handwritten root Cargo manifest, creates parent
-  directories, and writes changed generated files without touching identical
-  files. A private helper appends missing
-  literal ignore entries in memory; generation includes this content in the same
-  file map used for previewing and writing.
-  Cleanup removes only `.wr`, `target`, and the generated root Cargo manifest,
-  checking the manifest's ownership marker before any removals. It preserves
-  lockfiles and user configuration and unlinks directory symlinks without
-  following them.
+The runner is a single Rust package. Application handlers compile in separate
+generated guest workspaces.
 
-## Validation and errors
+| Component | Responsibility |
+| --- | --- |
+| [main](src/main.rs) | Report errors and return the process exit status |
+| [CLI parser](src/cli/mod.rs) | Parse top-level arguments and dispatch commands |
+| [setup](src/cli/setup.rs), [build](src/cli/build.rs), [clean](src/cli/clean.rs), [run](src/cli/run.rs) | Keep each command's arguments, orchestration, and presentation together |
+| [Manifest service](src/services/manifest.rs) | Own application/dependency types, load and validate YAML, check cross-function constraints and configured sources, and resolve component paths |
+| [Workspace service](src/services/workspace.rs) | Discover sources, select dependencies, render workspace files, merge user configuration, write generated files, and clean owned outputs |
+| [Build service](src/services/build.rs) | Invoke Cargo and publish components from deterministic artifact paths |
 
-YAML parsing and merge resolution are delegated to `yaml_serde`. The complete
-resolved document is validated by `jsonschema` against the embedded
-[application schema](application.schema.json), then deserialized into application
-types. Route uniqueness is checked separately because it spans functions.
+Services are independent of CLI argument types and presentation. They return
+results for commands to present; Cargo's diagnostics pass through directly.
+This keeps application operations reusable without introducing generic provider
+or trigger frameworks.
 
-Parsing and validation libraries supply diagnostic detail. The command adds
-basic context and reports failures through `anyhow`; custom source-location
-tracking is not part of the design.
+## Important flows
 
-## Boundaries
+```mermaid
+flowchart TD
+    CLI[CLI command] --> Load[Load and validate manifest]
+    Load --> Run[Run: print metadata]
+    Load --> Discover[Discover source functions]
+    Discover --> Generate[Generate files in memory]
+    Generate --> Preview[Setup dry-run: print preview]
+    Generate --> Write[Check ownership and write changed files]
+    Write --> Setup[Setup: report workspace]
+    Write --> Cargo[Build: invoke Cargo]
+    Cargo --> Publish[Check all artifacts, then copy components]
+    CLI --> Clean[Clean: check ownership and remove generated outputs]
+```
 
-Component paths and HTTP routes are currently metadata, not executable resources.
-There is no component runtime or HTTP server. Their structure and technical
-details will be documented when implemented and established.
+Setup, build, and run load the manifest once within their command workflows.
+Clean only needs the directory, allowing recovery from invalid or missing
+application inputs. Run ends at metadata; component paths and routes do not
+imply execution or a bound listener.
 
-Every direct Rust file in `functions` is a target, independent of route
-configuration. Manifest loading rejects prebuilt module declarations and missing
-configured sources, and resolves component paths to `.wr/components/<name>.wasm`.
-Discovery validates and sorts source names. The generated guest workspace has
-one `cdylib` crate per source, with explicit library names for deterministic
-artifacts. Its root manifest is beside `application.yaml`, separate from the
-host development workspace. Member manifests under `.wr/functions` explicitly
-select that workspace and point at generated entry points. These include the
-original sources as modules. For editor analysis, rust-analyzer also needs the
-original `functions` directory in `vfs.extraIncludes`, because it is outside the
-generated Cargo package directories. Setup merges this setting automatically;
-Cargo builds need no such setting.
+YAML parsing and merge resolution use `yaml_serde`. The resolved document is
+validated by `jsonschema` against the embedded schema and deserialized into
+application types. Route uniqueness and source existence need additional checks
+because they span functions or depend on the filesystem. Library diagnostics
+receive basic operation context through `anyhow`; custom source-location
+tracking is not part of the design. See [validation stages](docs/reference.md#validation-stages).
 
-The workspace service embeds the checked-in [WIT world](wit/world.wit), copies it into
-the generated workspace, and supplies a managed `wit-bindgen` dependency.
-Generated entry points implement the WIT-exported handler trait and expose
-`Request` and `Response` at the crate root. User handlers return those types
-directly; no parallel request/response model or conversion layer is introduced.
+## Guest workspace boundary
 
-Build uses ordinary Cargo targeting `wasm32-wasip2`, an explicit application-local
-target directory, and debug or release profile. Cargo owns dependency resolution,
-incremental compilation, concurrency, diagnostics, and the application lockfile.
-The build service computes artifact locations rather than parsing JSON messages,
-and copies all expected outputs only after Cargo succeeds and every artifact
-exists. Writes and publication are not transactional. Obsolete generated files
-and components remain untouched.
+Guest and runner workspaces are separate so application dependencies, lockfiles,
+and build artifacts have their own lifecycle. The application-root Cargo
+manifest also gives editor tooling a discoverable workspace. Each discovered
+function gets a `cdylib` package with explicit workspace membership and a
+library name, making artifact paths predictable. The
+[generated-file reference](docs/reference.md#generated-files) defines the layout.
 
-The HTTP world is the only supported trigger. Event-specific worlds and shared
-host capability imports can be introduced separately; no generic trigger
-framework is needed for this increment. WASI imports from the compilation target
-will need host implementations and a capability policy when execution is added.
-See the [guest notes](wit/README.md).
+Generated entry points include the original handler sources and use the embedded
+[WIT world](wit/world.wit) to generate bindings. They implement the exported guest
+trait and expose its `Request` and `Response` types directly to handlers.
+There is no parallel request/response model or conversion layer to keep in sync.
+
+The original sources live outside the generated package directories. Setup
+therefore merges a rust-analyzer source include into the application's editor
+settings; Cargo resolves the source paths without that configuration. The
+[editor guide](docs/guides.md#prepare-vs-code) covers workspace selection.
+
+## Generation and ownership
+
+Generation produces a sorted map of relative paths to contents before any
+writes. Preview and writing share that output, so validation and rendering
+failures cannot leave a partially generated workspace. TOML serialization uses
+`toml`; `jsonc-parser` merges editor settings while preserving existing comments
+and formatting. Ignore entries are merged as literal lines rather than by
+interpreting pattern semantics.
+
+The writer checks the root manifest's ownership marker before modifying files
+and skips identical content to preserve incremental compilation. Cleanup checks
+the same marker before removing its documented outputs. These checks protect
+handwritten manifests; they do not make filesystem operations transactional.
+Obsolete generated files stay in place until cleanup. Exact preservation and
+failure boundaries are in [Setup](docs/reference.md#setup) and
+[Clean](docs/reference.md#clean).
+
+## Compilation and publication
+
+Cargo owns dependency resolution, lockfiles, incremental compilation, concurrency,
+and compiler diagnostics. The build service supplies the WASM target, profile,
+and application-local target directory. It computes artifact paths from explicit
+library names instead of parsing Cargo JSON output, reducing orchestration to
+the information it needs.
+
+Only successful compilation followed by existence checks for all expected
+artifacts allows publication to begin. This prevents failed Cargo builds from
+publishing stale outputs as new successes. Copies are not transactional: a later
+copy failure can leave mixed published outputs. See [Build](docs/reference.md#build).
+
+## Runtime boundary
+
+There is no component runtime, HTTP transport, or host capability policy yet.
+The current guest world declares no host imports, but `wasm32-wasip2` can
+introduce WASI imports that a future host must satisfy. The custom guest
+interface is not WASI HTTP.
+
+Future execution and trigger design belongs to the
+[open product decisions](SPEC.md#open-decisions). Add concrete boundaries when
+those features are agreed; do not scaffold unused runtime or trigger modules.

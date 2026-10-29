@@ -25,35 +25,24 @@ to one task; keep the reasoning and reporting proportional to the change.
   [wasm-runner-test-selection](.agents/skills/wasm-runner-test-selection/SKILL.md).
   Documentation-only and mechanical edits do not need this testing workflow.
 
-## Readability and scope
+## Shared engineering policy
 
-Use descriptive names, sensible whitespace, and straightforward control flow.
-Keep comments sparse: explain non-obvious reasons or constraints without
-narrating the code.
+Follow the [engineering principles](CONTRIBUTING.md#engineering-principles),
+[verification policy](CONTRIBUTING.md#verification), and
+[documentation ownership rules](CONTRIBUTING.md#documentation-ownership).
+These include readability, scoped design, embedding bundled text assets, and
+testing through public interfaces. Keep shared policy in the contributor guide
+rather than maintaining a second copy here.
 
-Embed bundled text assets with `include_str!` rather than reading them from disk
-at runtime. Declare embeddings as descriptively named module-level `const` values
-near the top of the file, after imports, rather than referencing them inline.
-Apply the same convention to test fixtures.
-
-Give abstractions cohesive responsibilities and separate orchestration from
-implementation details. Choose the smallest coherent solution: fewer concepts
-and clearer reasoning, without compressed code or speculative generalization.
-Prefer existing tools and documented prerequisites for responsibilities outside
-the project. When complexity is challenged, reconsider the design before adding
-another special case.
-
-## Testing principles
-
-Test meaningful behavior through public interfaces and major workflows.
-Do not add a regression test automatically for every change. Preserve useful
-tests across behavior-preserving refactors; avoid assertions coupled to private
-implementation details. Prefer real collaborators and focused fixtures.
+Use [product requirements](SPEC.md) for scope and acceptance conditions,
+[reference](docs/reference.md) for exact behavior, and
+[architecture](ARCHITECTURE.md) for implementation responsibilities and rationale.
 
 ## Development and completion
 
-Use the lifecycle commands in [Makefile](Makefile) and the prerequisites in
-[README.md](README.md). Keep project-specific setup durable, idempotent, and
+Use the lifecycle commands in [Makefile](Makefile) and the
+[development workflow](CONTRIBUTING.md#development-workflow), including its linked
+prerequisites. Keep project-specific setup durable, idempotent, and
 reviewable through `make setup` and version-controlled configuration. Report
 environment blockers instead of requesting ad hoc installations or working
 around execution restrictions.

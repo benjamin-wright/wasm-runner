@@ -2,7 +2,7 @@
 name = "wasm-runner"
 version = "0.1.0"
 edition = "2024"
-description = "Run local WebAssembly components as HTTP endpoints"
+description = "Prepare and build WebAssembly function components from an application manifest"
 publish = false
 
 [[bin]]

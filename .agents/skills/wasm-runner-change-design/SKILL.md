@@ -15,22 +15,26 @@ proportional to the decisions involved.
 
 ## Establish the contract and current state
 
-Read the relevant implementation and tests. Use [README.md](../../../README.md)
-for development commands and current status, [SPEC.md](../../../SPEC.md) for
-host behavior and scope, and [ARCHITECTURE.md](../../../ARCHITECTURE.md) for
-implementation decisions. For guest-interface changes, also read the
+Read the relevant implementation and tests. Use the
+[contributor guide](../../../CONTRIBUTING.md) for development commands and
+documentation ownership, [requirements](../../../SPEC.md) for scope and
+acceptance conditions, [reference](../../../docs/reference.md) for exact
+behavior, and [architecture](../../../ARCHITECTURE.md) for implementation
+decisions. For guest-interface changes, also read the
 authoritative [WIT world](../../../wit/world.wit) and its
 [contract notes](../../../wit/README.md).
 
 Distinguish planned behavior from implemented behavior. Implement the requested
 slice; do not expand it to complete unrelated acceptance criteria. If the user
-requests a contract change, update the affected documents alongside the code.
+requests a contract change, update the affected documents alongside the code
+according to the contributor guide's ownership rules.
 
 ## Choose responsibilities and the simplest approach
 
 - Identify what `wr` must own and what existing tools or documented prerequisites
-  already provide. The current workflow takes prebuilt local components;
-  automatic guest builds and extra host capabilities require an explicit scope
+  already provide. Consult the [requirements](../../../SPEC.md) and
+  [reference](../../../docs/reference.md) before treating a
+  capability as new. Additional host capabilities require an explicit scope
   change rather than being incidental setup conveniences.
 - Compare the proposed approach with reusing or simplifying the current code.
   Justify new abstractions and dependencies by the concrete responsibility or

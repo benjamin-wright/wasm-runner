@@ -11,8 +11,9 @@ description: >-
 
 Identify the observable behavior affected by the change and inspect existing
 coverage before deciding whether to add a test. Use the relevant acceptance
-criteria in [SPEC.md](../../../SPEC.md) and proof points in
-[ARCHITECTURE.md](../../../ARCHITECTURE.md). Limit verification to the requested
+criteria and coverage map in [requirements](../../../SPEC.md#implemented-requirements),
+the exact contracts in [reference](../../../docs/reference.md), and existing
+cases in [tests/cli.rs](../../../tests/cli.rs). Limit verification to the requested
 work and its effects; planned runtime features may not exist yet.
 
 ## Choose the boundary and cases

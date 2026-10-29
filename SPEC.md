@@ -1,152 +1,78 @@
-# Current functionality
+# Product requirements
 
-`wr` is a command-line tool that loads an application manifest, validates it,
-prints its metadata, and exits. It does not load WebAssembly components or serve
-HTTP requests. It also generates a Cargo workspace and builds HTTP function components.
+This document states product scope, intended outcomes, and observable acceptance
+conditions. The [shared reference](docs/reference.md) is part of these
+requirements: it defines the exact command, validation, filesystem, and failure
+contracts. The [schema](application.schema.json) and [WIT world](wit/world.wit)
+remain the authoritative field and interface definitions. Implementation
+rationale belongs in [Architecture](ARCHITECTURE.md).
 
-## Command line
+## Audience and problem
 
-```sh
-wr run examples
-wr run examples --listen 127.0.0.1:9000
-wr setup examples
-wr setup examples --dry-run
-wr build examples
-wr build examples --release --locked
-wr clean examples
-```
+The current increment serves Rust application authors who need to turn function
+sources and route configuration into WebAssembly components. The working product
+rationale is to remove the repetitive work of assembling Cargo packages,
+guest bindings, and component outputs while keeping source and configuration
+under the author's control.
 
-The application directory is required. Setup, build, and run read `application.yaml`
-inside it; alternate filenames are not supported. Clean does not load the
-application manifest. The optional listener address accepts a numeric
-IP address and port and defaults to `127.0.0.1:8080`. It is reported as
-configuration only; no socket is opened. Environment variables do not alter
-application configuration.
+The longer-term ambition is to run those functions as HTTP endpoints. This
+increment prepares and builds them; it does not provide a working application
+server. Product priorities beyond this increment remain open decisions.
 
-## Manifest
+## Current scope
 
-An application has a name and a nonempty collection of named functions. Each
-configured function declares an HTTP method/path pair. See the
-[example manifest](examples/application.yaml) for the format and
-[application.schema.json](application.schema.json) for field constraints.
+The supported workflow is to describe an application in YAML, author Rust
+handlers against the guest contract, preview or write a generated workspace,
+build components, inspect application metadata, and clean generated outputs.
+Source discovery is independent of route configuration, within the
+[manifest and discovery constraints](docs/reference.md#source-discovery).
 
-The tool accepts one YAML document, including anchors, aliases, and merge keys.
-It validates the resolved document against its embedded schema and rejects
-duplicate mapping keys and duplicate method/path pairs.
+## Implemented requirements
 
-Every configured function must have a source file at `functions/<name>.rs`.
-Component paths are inferred as `.wr/components/<name>.wasm`, relative to the
-application directory. Prebuilt `module` declarations are rejected. Components
-do not need to exist for metadata output or setup.
+The following requirements preserve current public guarantees. Acceptance
+conditions describe observable results, not private implementation details.
+Existing evidence is identified in [tests/cli.rs](tests/cli.rs); that mapping
+is not a claim that a particular test run has passed or exhaustive coverage of
+every filesystem failure.
 
-Every direct `functions/*.rs` file is a build target, even without YAML
-configuration. Discovery is non-recursive and ignores directories and other
-extensions. Discovered names must satisfy the schema's identifier constraints.
-Unconfigured functions inherit shared dependencies and have no HTTP route.
+| ID | Requirement and reason | Observable acceptance condition and existing coverage |
+| --- | --- | --- |
+| R1 | Reject invalid application inputs before reporting successful application results, so authors can correct configuration before use. | Setup, build, and run reject invalid manifests and missing configured sources; run emits no metadata on those failures. Validation follows the [documented stages](docs/reference.md#validation-stages). Covered by `invalid_manifests_fail_before_printing_metadata`, `commands_require_a_directory_and_report_missing_function_sources`, and the YAML/schema cases. |
+| R2 | Let authors inspect generated content before changing their application, and protect handwritten root Cargo manifests when writing. | Dry-run creates no files or directories and previews the same generated content used by setup. Writing refuses a handwritten root manifest before any writes. Covered by `setup_previews_workspace_without_writing_files`, `setup_writes_the_previewed_files_beside_the_manifest_and_can_be_repeated`, and `setup_preserves_an_existing_handwritten_cargo_manifest`. |
+| R3 | Build a guest-contract component for every valid directly discovered source, including sources without route entries. | Successful builds publish every expected component with the [guest interface](wit/README.md); invalid discovered names fail setup. Covered by `setup_discovers_all_direct_rust_sources_and_rejects_invalid_names` and `build_produces_http_components_and_preserves_outputs_on_cargo_failure`. |
+| R4 | Preserve previously published components when Cargo compilation fails, so a failed build cannot appear to publish a new successful result. | The command fails and leaves published components unchanged. Publication-copy failures are separately [nontransactional](docs/reference.md#build). Covered by `build_produces_http_components_and_preserves_outputs_on_cargo_failure`. |
+| R5 | Remove only the documented generated workspace and build outputs during cleanup, preserving application inputs and user configuration. | The [cleanup set and ownership checks](docs/reference.md#clean) apply even with a missing or invalid application manifest. Missing outputs are tolerated, and removed directory symlinks are not followed. Covered by `clean_removes_generated_files_and_preserves_user_files`, `clean_refuses_a_handwritten_cargo_manifest_before_removing_anything`, `clean_does_not_require_a_valid_manifest_or_function_sources`, and `clean_removes_directory_symlinks_without_following_them`. |
+| R6 | Make run's current metadata-only behavior explicit, so authors do not mistake it for a serving process. | Run reports validated application metadata and the execution/serving limitation without requiring component files or opening a listener. Covered by `run_prints_metadata_without_requiring_components_or_announcing_readiness`. |
+| R7 | Preserve user configuration and support repeated setup without unnecessary churn, making the generated workspace usable during development. | Ignore rules and editor settings are merged as [documented](docs/reference.md#ignore-rules-and-editor-settings); repeated setup avoids duplicates and leaves identical generated files untouched. Invalid editor settings fail before writing. Covered by the setup repeatability, ignore-rule, editor-merge, and invalid-settings cases; incremental build reuse is checked in the component build case. |
+| R8 | Let authors configure supported shared and per-function dependencies and repeat locked builds, while keeping guest dependency resolution separate from the runner. | Invalid declaration conflicts fail generation; debug/release builds use the [documented lockfile behavior](docs/reference.md#build), and `--locked` refuses a missing or outdated lockfile. Covered by `setup_rejects_invalid_dependencies_without_partial_output` and the component build case. |
 
-Optional top-level `dependencies` apply to all source functions; optional
-function-level `dependencies` add dependencies to that function only. Values
-are version strings or objects containing a required `version`, optional string
-array `features`, and optional boolean `default-features`. Other dependency
-fields are rejected. `wit-bindgen` is reserved for generated bindings and may
-not be declared as an application dependency. Cargo interprets version requirements during a
-build; setup does not resolve dependencies.
+Failure behavior, output paths, and preservation rules in the reference are
+part of these commitments even where the table summarizes them. Filesystem
+writes, removal, and publication are not promised to be transactional.
 
-## Setup
+## Deliberate exclusions
 
-`wr setup <DIRECTORY>` validates the manifest and sources and writes a generated Cargo
-workspace rooted beside the application manifest, with member manifests under
-`.wr/functions/<name>`. It creates parent directories and replaces changed
-generated files, leaving identical files untouched for incremental builds.
-A root `Cargo.toml` without the setup-generated header is
-rejected before any writes. Setup also creates or updates `.gitignore` beside
-the application manifest. It preserves existing contents and appends missing
-entries from `.wr/`, `/Cargo.toml`, and `/target/`, checking for exact matching
-lines. It adds a separating newline if needed. Repeated runs do not duplicate
-these entries. Existing patterns, including negations, are not interpreted or
-reordered. No ignore entry is added for `Cargo.lock`.
-Setup also creates or merges `.vscode/settings.json`, adding
-`${workspaceFolder}/functions` to `rust-analyzer.vfs.extraIncludes` if absent.
-Existing include paths and unrelated settings are retained, along with comments
-and formatting. JSON comments and trailing commas are supported. Invalid editor
-settings or an include setting that is not an array of strings are rejected
-before any writes. Repeated runs do not duplicate the include path.
-Existing files that are not
-part of the generated output are left alone, including obsolete function
-directories, build artifacts, and lockfiles. Success reports the workspace path.
-It includes a root Cargo manifest and a `cdylib` package manifest for each source
-function. Each member explicitly selects the application workspace and sets
-`lib.path` to a generated `lib.rs` entry point. This entry point includes
-`functions/<name>.rs`, generates bindings from `.wr/wit/world.wit`, re-exports
-the WIT `Request` and `Response` types, implements the exported handler trait,
-and exports the implementation. Packages are named `wr-function-<name>`;
-explicit library names are `wr_function_<name>` with hyphens replaced by
-underscores. Common dependencies are declared in
-`workspace.dependencies` and explicitly inherited by each function crate.
-Each function's additional dependencies appear only in its own package.
+This increment does not execute components, serve HTTP requests, implement a
+host capability policy, provide SQL/KV host services, or handle event triggers.
+The custom guest interface is not WASI HTTP. Prebuilt module declarations,
+automatic prerequisite installation, file watching, and unsupported dependency
+forms are outside the current contract. See the
+[reference](docs/reference.md) for exact input constraints.
 
-Setup rejects an application with no source functions and rejects a dependency declared both globally and
-locally for a source function. Validation and generation finish before any
-filesystem changes. Filesystem errors include the failing path; writes are not
-transactional, so earlier files can have been written when a later write fails.
+## Open decisions
 
-With `--dry-run`, setup only writes stdout: it prints file paths in sorted
-order, followed by their contents in the same order, including the merged
-`.gitignore` and editor settings, without creating files or directories. Validation and generation
-errors produce no preview output.
+No additional delivery dates, performance targets, supported-platform promises,
+or accepted future implementation requirements are established by this migration.
+HTTP serving is an ambition, not a completed capability or scheduled release.
 
-Neither mode reads source contents, invokes Cargo, generates or synchronizes
-lockfiles, or watches changes.
+- Confirm the working product rationale and the priority of the next user outcome.
+- Define component execution, HTTP translation, resource limits, and the policy
+  for WASI and other host imports before implementing a runtime.
+- Decide whether and when non-HTTP event triggers or SQL/KV capabilities belong
+  in scope. Separate event-specific worlds and shared capability imports are
+  design possibilities, not approved features or binding architectural choices.
 
-## Clean
-
-`wr clean <DIRECTORY>` removes `.wr/`, `target/`, and the root `Cargo.toml`
-generated by setup. This includes obsolete generated files, published components,
-and all build profiles. It preserves sources, the application manifest,
-`Cargo.lock`, `.gitignore`, editor settings, and other application files.
-If the root Cargo manifest exists without the setup-generated header, clean
-refuses before removing anything.
-
-The directory must exist and be a directory. Cleanup does not require the
-application manifest or function sources to exist or be valid, and it does not
-run Cargo. Missing generated files are ignored, making repeated cleanup succeed.
-Directory symlinks are unlinked rather than traversed. Removal errors include the
-affected path; removals are not transactional. Success reports the workspace path.
-Setup and build can regenerate the workspace afterwards.
-
-## Build
-
-`wr build <DIRECTORY>` refreshes the generated workspace and invokes Cargo once
-to build all workspace libraries for `wasm32-wasip2`. It supplies an explicit
-application-local `target` directory, overriding Cargo's target-directory
-configuration. Debug is the default profile; `--release` enables optimization.
-`--locked` requires an existing up-to-date guest lockfile; otherwise Cargo may
-create or update it. The guest lockfile is separate from the CLI lockfile.
-
-Handlers have the signature `pub fn handle(request: Request) -> Response`, using
-the WIT-generated Rust types re-exported at the crate root. Expected failures
-are represented as HTTP responses, not automatically translated Rust errors.
-Generated components export `local:http/handler@0.1.0` from the `http-function`
-world. This is a custom interface, not WASI HTTP. The build target may introduce
-additional WASI imports that a future host must satisfy.
-
-Cargo's output is inherited directly. Nonzero Cargo status fails the command;
-old artifacts are never used as evidence of success. After Cargo succeeds,
-all expected artifacts at `target/wasm32-wasip2/<profile>/wr_function_<name>.wasm`
-are checked for existence, then copied to `.wr/components/<name>.wasm`.
-Hyphens in artifact library names become underscores. Each copied component is
-reported. Cargo failure does not alter previously published components; copying
-is not transactional if a later filesystem operation fails. Obsolete outputs
-are not removed. No automatic prerequisite installation, runtime execution,
-HTTP serving, SQL/KV support, or event handling is included.
-
-## Output and errors
-
-On successful `run`, print the application name, manifest path, configured listener,
-function count, and routes with resolved module paths in function-name order.
-The output states that component execution and HTTP serving are not implemented.
-
-Invalid arguments or a manifest loading or validation failure produce an error
-and a nonzero exit status. Manifest failures produce no metadata output.
-Diagnostics use the detail provided by the parsing and validation libraries,
-with basic operation context; no particular error-location format is required.
+New requirements should state their rationale and observable acceptance
+conditions, distinguish accepted work from ideas, and link to the relevant
+contract and design decision. Follow the
+[documentation maintenance rules](CONTRIBUTING.md#maintain-documentation-with-each-change).
