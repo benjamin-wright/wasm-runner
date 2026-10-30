@@ -26,8 +26,9 @@ Clean does not load a manifest.
 | `wr deploy <DIRECTORY>` | Upload existing built components and atomically create or replace the named application. |
 | `wr apps list` | Print name and path prefix separated by a tab, one application per line, sorted by name. |
 | `wr remove <NAME>` | Remove the application's routes; already selected generations remain alive until their requests finish. |
+| `wr admin [--listen <IP:PORT>]` | Serve a local, read-only daemon overview in the foreground. Defaults to an available port on `127.0.0.1`. See [Admin UI](#admin-ui). |
 
-Daemon operations accept the global `--state-dir <DIRECTORY>` option. See
+Daemon operations and the admin UI accept the global `--state-dir <DIRECTORY>` option. See
 [daemon and deployment](#daemon-and-deployment) for lifecycle and transport details.
 
 Use `wr --help`, `wr --version`, or `wr <COMMAND> --help` to inspect the CLI.
@@ -393,6 +394,48 @@ failures, and failed operations exit nonzero. Manifest failures produce no
 readiness output. Diagnostics use parsing and validation library detail with
 basic operation context; no particular error-location format is guaranteed.
 
+## Admin UI
+
+`wr admin` requires Unix and serves a read-only browser overview of the selected
+daemon. It runs in the foreground on a separate HTTP listener. `--listen` takes
+a numeric loopback IP and port, defaults to `127.0.0.1:0`, and accepts port zero
+to select an available port. Non-loopback addresses are rejected. Rocket
+configuration files and environment variables do not override these settings.
+
+After binding, the command prints `Admin UI listening on http://<IP:PORT>`.
+Open that URL in a browser; the command does not launch one automatically. A
+bind failure exits with an error and no readiness message. The daemon need not
+be running to start the UI. Selection follows the same `--state-dir`,
+`WR_STATE_DIR`, and default-directory rules as
+[daemon commands](#daemon-and-deployment). The UI does not create daemon state
+or start the daemon.
+
+`GET /` queries the private control socket for live status and returns HTML
+showing the daemon PID, hosting address, and application names and path prefixes
+sorted by name. Each application includes its deployed functions sorted by name,
+with their HTTP methods and application-relative route paths (before the
+application's path prefix is applied). Dynamic captures are displayed literally.
+Only deployed functions appear; source files without configured routes are not
+deployed. An empty registry is shown explicitly. The Refresh link or a
+browser refresh queries again; there is no automatic polling. `GET /style.css`
+serves the bundled stylesheet. Rocket supplies HEAD fallback. No browser
+JavaScript, external assets, application source directories, or local build
+outputs are required.
+
+The control exchange has a five-second deadline. Unavailable, malformed,
+unexpected, or timed-out replies produce an HTTP 503 error page; a timeout
+closes the control connection. Each later page request retries independently,
+so the UI can recover after a daemon restart. Responses use `Cache-Control:
+no-store`, and errors never display an earlier successful snapshot as current.
+Metadata and diagnostic text are HTML-escaped.
+
+The UI has no deployment, removal, or daemon lifecycle actions. SIGINT (Ctrl-C)
+or SIGTERM closes its listener and allows in-flight metadata requests to finish
+within their deadline. This leaves the daemon and its applications running.
+The UI never occupies application routes, even when an application owns `/`.
+It provides local inspection only, with no remote or multi-user administration
+contract. See the [browser inspection recipe](guides.md#inspect-the-daemon-in-a-browser).
+
 ## Daemon and deployment
 
 These commands currently require Unix (including macOS and Linux). The daemon is
@@ -465,8 +508,11 @@ message is a four-byte big-endian byte length followed by UTF-8 JSON, capped at
 each handler contains `name`, `method`, `path`, and `component` (an array of byte
 values). Remove includes `name`. Responses use `result: ok`, `applications`
 (with `applications`), `status` (with `pid`, `listen`, and `applications`), or `error`
-(with `message`). Both application lists contain objects with `name` and
-`path-prefix` fields. CLI status displays the prefix beside each application name.
+(with `message`). Both application lists contain objects with `name`,
+`path-prefix`, and `functions` fields. `functions` is sorted by name and contains
+objects with `name`, `method`, and application-relative `path` from the active
+routes. Component bytes are not included in these metadata responses. CLI list
+and status output continue to display only application names and prefixes.
 Four control requests may run concurrently; excess connections
 are closed. Client reads time out after 120 seconds; a timeout does not cancel a
 server-side deployment. The control socket is local administration, not a remote
@@ -479,3 +525,8 @@ contains lifecycle files and logs, not persisted application configuration.
 After upgrading from a version without path prefixes, restart the daemon so
 the CLI and control server use the same deployment and listing formats. Add an
 explicit `path-prefix` to each manifest before redeploying.
+
+After upgrading from a version without function metadata, restart the daemon
+and redeploy applications before using the updated client. List and status
+responses require `functions`; an older daemon's response produces a metadata
+error rather than an empty function list.

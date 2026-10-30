@@ -28,6 +28,14 @@ pub(super) struct Application {
 pub(crate) struct ApplicationInfo {
     pub name: String,
     pub path_prefix: String,
+    pub functions: Vec<FunctionInfo>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FunctionInfo {
+    pub name: String,
+    pub method: String,
+    pub path: String,
 }
 
 impl Applications {
@@ -56,9 +64,27 @@ impl Applications {
             .read()
             .expect("application registry")
             .iter()
-            .map(|(name, application)| ApplicationInfo {
-                name: name.clone(),
-                path_prefix: application.path_prefix.clone(),
+            .map(|(name, application)| {
+                let mut functions: Vec<_> = application
+                    .client
+                    .rocket()
+                    .routes()
+                    .map(|route| FunctionInfo {
+                        name: route
+                            .name
+                            .as_deref()
+                            .expect("named application route")
+                            .to_owned(),
+                        method: route.method.to_string(),
+                        path: route.uri.to_string(),
+                    })
+                    .collect();
+                functions.sort_by(|left, right| left.name.cmp(&right.name));
+                ApplicationInfo {
+                    name: name.clone(),
+                    path_prefix: application.path_prefix.clone(),
+                    functions,
+                }
             })
             .collect()
     }

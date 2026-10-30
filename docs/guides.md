@@ -250,3 +250,29 @@ routes (or return 404 after removal). To check shutdown draining, start the same
 loop and run `wr daemon stop` while it executes. Stop should wait for that
 execution to finish before reporting success. Repeat with a disconnected client
 to check that its execution still holds capacity until the deadline.
+
+## Inspect the daemon in a browser
+
+Start the daemon and deploy your built applications as above, then run:
+
+```sh
+wr admin
+```
+
+Open the printed `Admin UI listening on http://...` URL in a browser. The page
+shows the daemon PID, hosting address, and application names and path prefixes.
+Each application's Functions column lists deployed function names, HTTP methods,
+and paths relative to that application's prefix.
+Use Refresh after deploying, replacing, or removing an application to retrieve
+its current state. An empty daemon is shown as having no deployed applications.
+
+For a fixed UI port, use `wr admin --listen 127.0.0.1:9001`. To inspect an
+isolated daemon, pass its usual `--state-dir <DIRECTORY>` to the admin command.
+The UI works from any directory and needs no local application files.
+
+If the page reports unavailable metadata, check the selected state directory
+and run `wr daemon status` with the same selection. Start the daemon if needed,
+then refresh the page. The UI may remain running while the daemon restarts.
+Ctrl-C in the admin terminal stops only the UI; the daemon and deployed
+applications keep running. See [Admin UI](reference.md#admin-ui) for the exact
+listener, response, and timeout behavior.

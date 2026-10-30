@@ -25,7 +25,8 @@ A reusable synchronous runtime and a CLI-independent HTTP server support
 embedding applications as well as the CLI. On Unix, a background daemon hosts
 multiple applications at declarative, nonoverlapping path prefixes on one HTTP listener, with a private control socket for
 atomic deployment, listing, removal, status, and shutdown. Deployments are
-in-memory and must be resubmitted after restarting the daemon.
+in-memory and must be resubmitted after restarting the daemon. A foreground
+`wr admin` client serves a local, read-only browser view of live daemon metadata.
 Source discovery is independent of route configuration, within the
 [manifest and discovery constraints](docs/reference.md#source-discovery).
 
@@ -61,6 +62,51 @@ writes, removal, and publication are not promised to be transactional.
 | R11 | Separate daemon lifecycle from application deployment. | `daemon start` returns after both listeners are bound, or succeeds by reporting an already running instance without changing its address or applications. `status` queries the live process, and `stop` waits for listener closure and execution draining. Failed startup leaves no new live daemon. `daemon_lifecycle_owns_both_listeners_and_restarts_empty` covers process lifecycle, repeated starts, failed binding, socket permissions, singleton ownership, and stale-socket recovery; the component-build workflow checks preservation of deployments on repeated start. Draining active executions remains a manual scenario. |
 | R12 | Host independently managed applications without interrupting unrelated routes. | A deployment contains identity, an explicit path prefix, routes, and component bytes. Invalid components, internal route collisions, or overlapping prefixes leave all active applications unchanged. Replacement and removal affect future requests; requests already using a generation retain it. The component-build workflow covers two applications, failed and successful replacements, concurrent requests, removal, independence from source paths, and empty restart; replacing an executing generation remains a manual scenario. |
 | R13 | Declare application mount points without deployment flags or retained defaults. | Every manifest requires a canonical `path-prefix`. Run and deploy serve application-relative routes beneath it and strip the prefix before guest execution. Different applications may share function paths but cannot have equal or nested prefixes. Listing/status show current prefixes. Prefix changes publish atomically with the application, and failures preserve old mounts. `manifests_require_literal_canonical_path_prefixes` covers input constraints; the component-build workflow covers prefix routing, capture/query preservation, boundaries, root mounts, conflicts, replacement, and removal. |
+
+### R14: Local administration UI through the client
+
+Let authors inspect the running daemon and its deployed applications in a
+browser through a lightweight, read-only UI started by the `wr` client. The
+client queries the selected daemon over its existing private control socket
+and renders simple HTML pages on the server. The daemon remains the source of
+live metadata; the client owns presentation and the UI listener.
+
+Observable acceptance conditions:
+
+- `wr admin` starts the UI in the foreground on a loopback-only HTTP
+  listener and reports its URL after binding succeeds. It uses the existing
+  daemon selection rules described in the
+  [reference](docs/reference.md#daemon-and-deployment).
+- Pages show the daemon's PID and hosting address, and deployed application
+  names and path prefixes in a stable order. Each application lists its deployed
+  functions by name, with HTTP methods and application-relative route paths.
+  An empty daemon is explicitly shown as having no deployed applications.
+- Loading or refreshing a page queries live daemon metadata, so subsequent
+  requests reflect deployments, replacements, and removals without restarting
+  the UI. Inspection does not require application source directories or local
+  build outputs.
+- An unavailable daemon or failed metadata request produces a clear error
+  within a bounded time, rather than displaying stale data as current. A later
+  page request can recover when the daemon becomes available.
+- Navigation and refresh work without browser JavaScript. Templates and styles
+  are bundled with `wr`, with no separate asset installation or runtime CDN
+  dependency. Metadata is escaped when rendered into HTML.
+- The UI listener is separate from the daemon's application hosting listener,
+  so deployed routes, including a root mount, cannot conflict with UI pages.
+  Stopping the UI closes its listener without stopping or changing the daemon
+  or its deployments.
+
+The initial UI provides inspection only. Browser-initiated deployment, removal,
+and daemon lifecycle changes, remote access, logs, and
+metrics are outside this requirement. The [admin reference](docs/reference.md#admin-ui)
+defines command options, page responses, and timeouts. Coverage in
+`admin_ui_reports_live_status_and_recovers` checks startup, metadata, errors,
+escaping, recovery, and independent shutdown; `admin_ui_cancels_stalled_metadata_requests`
+checks the control deadline and connection cancellation. The existing
+component-build workflow checks live deployment, replacement, removal, root
+mounts, and independence from local build outputs. It also checks function
+names, ordering, methods, escaped dynamic paths, and metadata preservation on
+failed deployment and refresh after replacement or removal.
 
 ## Deliberate exclusions
 

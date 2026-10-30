@@ -2,7 +2,7 @@
 name = "wasm-runner"
 version = "0.1.0"
 edition = "2024"
-description = "Build, deploy, and host WebAssembly HTTP applications"
+description = "Build, deploy, host, and inspect WebAssembly HTTP applications"
 publish = false
 
 [[bin]]

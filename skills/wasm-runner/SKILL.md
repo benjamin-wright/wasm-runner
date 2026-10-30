@@ -95,6 +95,10 @@ curl -i http://127.0.0.1:9000/my-app/hello
 Expect status 200 and `Hello, world!`. Stop with `wr daemon stop`.
 After source or manifest changes, rebuild and redeploy the application.
 Use `wr apps list` to inspect deployed names and `wr remove my-app` to remove one.
+Use `wr admin` for a read-only browser overview of applications and their deployed
+functions, HTTP methods, and relative route paths. Open its printed local URL and
+refresh after deployment changes; Ctrl-C stops the UI while leaving the daemon
+running. Use the same `--state-dir` selection as your other daemon commands.
 Every manifest requires `path-prefix`: use `/my-app` to mount this application
 or `/` for sole-application root hosting. Equal or nested prefixes conflict;
 different applications may use identical relative function routes. Conflicting

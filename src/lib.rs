@@ -1,3 +1,5 @@
+#[cfg(unix)]
+mod admin;
 mod cli;
 mod control;
 mod daemon;

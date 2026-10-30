@@ -9,7 +9,10 @@ the application's dependency lockfile, `wr build` compiles components using
 locked dependencies by default, and `wr clean` removes generated files and build
 outputs. On Unix, `wr daemon start` starts a background host and `wr deploy`
 adds or replaces applications at their declared `path-prefix` without restarting it. `wr apps list`, `wr remove`,
-and `wr daemon status`/`stop` manage the running host. Deployments are held in
+and `wr daemon status`/`stop` manage the running host. `wr admin` opens a local
+HTTP listener for a read-only browser overview of the selected daemon, including
+each application's deployed functions and routes. See
+[browser inspection](docs/guides.md#inspect-the-daemon-in-a-browser). Deployments are held in
 memory. `wr run` remains available for foreground serving. The hosting listener
 defaults to `127.0.0.1:8080`; the library exposes a reusable runtime and HTTP server.
 

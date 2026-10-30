@@ -1140,6 +1140,193 @@ fn http(address: &str, method: &str, path: &str) -> String {
 }
 
 #[cfg(unix)]
+struct AdminFixture {
+    child: std::process::Child,
+    address: String,
+}
+
+#[cfg(unix)]
+impl AdminFixture {
+    fn start(state_directory: &std::path::Path) -> Self {
+        use std::{
+            io::{BufRead, BufReader},
+            process::Stdio,
+            sync::mpsc,
+            time::Duration,
+        };
+
+        let mut admin = Self {
+            child: Command::new(env!("CARGO_BIN_EXE_wr"))
+                .arg("--state-dir")
+                .arg(state_directory)
+                .args(["admin", "--listen", "127.0.0.1:0"])
+                .env("ROCKET_ADDRESS", "0.0.0.0")
+                .env("ROCKET_PORT", "1")
+                .current_dir(state_directory.parent().unwrap())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+            address: String::new(),
+        };
+        let stdout = admin.child.stdout.take().unwrap();
+        let (sent, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if let Some(address) = line.unwrap().strip_prefix("Admin UI listening on http://") {
+                    let _ = sent.send(address.to_owned());
+                    break;
+                }
+            }
+        });
+        admin.address = received
+            .recv_timeout(Duration::from_secs(30))
+            .expect("admin readiness");
+        reader.join().unwrap();
+        assert!(
+            admin
+                .address
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .ip()
+                .is_loopback()
+        );
+        admin
+    }
+
+    fn page(&self) -> String {
+        http(&self.address, "GET", "/")
+    }
+
+    fn stop(&mut self, signal: &str) {
+        assert!(
+            Command::new("kill")
+                .args([signal, &self.child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "admin shutdown timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(std::net::TcpStream::connect(&self.address).is_err());
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AdminFixture {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn admin_ui_reports_live_status_and_recovers() {
+    let daemon = DaemonFixture::new();
+    for address in ["0.0.0.0:0", "[::]:0", "192.0.2.1:0"] {
+        let output = daemon.call(&["admin", "--listen", address]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("loopback"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Admin UI listening"));
+    }
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let output = daemon.call(&[
+        "admin",
+        "--listen",
+        &occupied.local_addr().unwrap().to_string(),
+    ]);
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Admin UI listening"));
+
+    let mut admin = AdminFixture::start(&daemon.directory.join("d"));
+    assert!(admin.page().starts_with("HTTP/1.1 503"));
+    let address = daemon.start();
+    let page = admin.page();
+    assert!(page.starts_with("HTTP/1.1 200"));
+    assert!(page.to_lowercase().contains("content-type: text/html"));
+    assert!(page.to_lowercase().contains("cache-control: no-store"));
+    assert!(page.contains(&format!("http://{address}")));
+    assert!(page.contains("No deployed applications."));
+    let status = daemon.success(&["daemon", "status"]);
+    let pid = status
+        .split("PID ")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    assert!(page.contains(&format!("<dd>{pid}</dd>")));
+    assert!(!page.contains("<script"));
+    let styles = http(&admin.address, "GET", "/style.css");
+    assert!(styles.starts_with("HTTP/1.1 200"));
+    assert!(styles.to_lowercase().contains("content-type: text/css"));
+    assert!(styles.contains("@media"));
+    assert!(http(&admin.address, "POST", "/").starts_with("HTTP/1.1 404"));
+    daemon.success(&["daemon", "stop"]);
+    let page = admin.page();
+    assert!(page.starts_with("HTTP/1.1 503"));
+    assert!(!page.contains("<dd>Running</dd>"));
+    let address = daemon.start();
+    assert!(admin.page().contains(&format!("http://{address}")));
+    admin.stop("-INT");
+    assert!(daemon.success(&["daemon", "status"]).contains(&address));
+
+    let escaped = AdminFixture::start(&daemon.directory.join("missing<&>\"'"));
+    let page = escaped.page();
+    assert!(page.contains("missing&lt;&amp;&gt;&quot;&#39;"));
+    assert!(!page.contains("missing<&>\"'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn admin_ui_cancels_stalled_metadata_requests() {
+    use std::{
+        io::Read,
+        os::unix::net::UnixListener,
+        time::{Duration, Instant},
+    };
+    let daemon = DaemonFixture::new();
+    let state = daemon.directory.join("d");
+    fs::create_dir(&state).unwrap();
+    let socket = state.join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let admin = AdminFixture::start(&state);
+    std::thread::scope(|scope| {
+        let peer = scope.spawn(|| {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            // The client must close its connection after timing out, without a reply.
+            stream.read_to_end(&mut request).unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&request[4..]).unwrap();
+            assert_eq!(request["command"], "status");
+        });
+        let started = Instant::now();
+        let page = admin.page();
+        assert!(page.starts_with("HTTP/1.1 503"));
+        assert!(page.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        peer.join().unwrap();
+    });
+    drop(listener);
+    fs::remove_file(socket).unwrap();
+    assert!(admin.page().starts_with("HTTP/1.1 503"));
+}
+
+#[cfg(unix)]
 #[test]
 fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
     use std::io::{Read, Write};
@@ -1233,6 +1420,7 @@ fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
 fn deploy_built_examples(directory: &std::path::Path) {
     let daemon = DaemonFixture::new();
     let address = daemon.start();
+    let mut admin = AdminFixture::start(&daemon.directory.join("d"));
     let first = ManifestFixture::new(MOUNTED_APPLICATION);
     let second = ManifestFixture::new(
         &MOUNTED_APPLICATION
@@ -1258,6 +1446,36 @@ fn deploy_built_examples(directory: &std::path::Path) {
         daemon.success(&["deploy", application.directory.to_str().unwrap()]);
     }
     serve_prefixed_foreground(&first);
+    let page = admin.page();
+    assert!(page.contains("/apps/one</code>"));
+    assert!(page.contains("/apps/one-more</code>"));
+    assert!(page.find(">first</th>").unwrap() < page.find(">second</th>").unwrap());
+    let first_row = page
+        .split(">first</th>")
+        .nth(1)
+        .unwrap()
+        .split("</tr>")
+        .next()
+        .unwrap();
+    let functions = [
+        ("echo", "POST", "/echo"),
+        ("files", "GET", "/files/&lt;path..&gt;"),
+        ("greet", "GET", "/hello"),
+        ("inspect", "GET", "/users/&lt;user_id&gt;/orders"),
+        ("root", "GET", "/"),
+    ];
+    let mut previous = 0;
+    for (name, method, path) in functions {
+        let entry =
+            format!("<strong>{name}</strong><span><code>{method}</code> <code>{path}</code>");
+        let position = first_row
+            .find(&entry)
+            .expect("deployed function with method and escaped path");
+        assert!(position >= previous, "functions sorted by name");
+        previous = position;
+    }
+    assert!(!page.contains("<user_id>"));
+    assert!(!page.contains("<path..>"));
     assert_eq!(daemon.start(), address);
     assert_eq!(
         daemon.success(&["apps", "list"]),
@@ -1322,6 +1540,11 @@ fn deploy_built_examples(directory: &std::path::Path) {
             .success()
     );
     assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
+    assert_eq!(
+        admin.page().split_once("\r\n\r\n").unwrap().1,
+        page.split_once("\r\n\r\n").unwrap().1,
+        "failed deployment preserves function metadata"
+    );
     fs::copy(
         directory.join(".wr/components/greet.wasm"),
         first.directory.join(".wr/components/greet.wasm"),
@@ -1355,7 +1578,9 @@ fn deploy_built_examples(directory: &std::path::Path) {
 
     fs::write(
         &first.path,
-        MOUNTED_APPLICATION.replace("/apps/one", "/replacement"),
+        greeting
+            .replace("/apps/one", "/replacement")
+            .replace("path: /hello", "path: /updated-hello"),
     )
     .unwrap();
     std::thread::scope(|scope| {
@@ -1368,14 +1593,41 @@ fn deploy_built_examples(directory: &std::path::Path) {
         requests.join().unwrap();
     });
     assert!(http(&address, "GET", "/apps/one/hello").starts_with("HTTP/1.1 404"));
-    assert!(http(&address, "GET", "/replacement/hello").ends_with("Hello, world!"));
+    assert!(http(&address, "GET", "/replacement/updated-hello").ends_with("Hello, world!"));
+    let page = admin.page();
+    assert!(page.contains("/replacement</code>"));
+    assert!(!page.contains("/apps/one</code>"));
+    let first_row = page
+        .split(">first</th>")
+        .nth(1)
+        .unwrap()
+        .split("</tr>")
+        .next()
+        .unwrap();
+    assert!(first_row.contains("<strong>greet</strong>"));
+    assert!(first_row.contains("<code>/updated-hello</code>"));
+    assert!(!first_row.contains("<strong>echo</strong>"));
+    assert!(!first_row.contains("<code>/hello</code>"));
+    let second_row = page
+        .split(">second</th>")
+        .nth(1)
+        .unwrap()
+        .split("</tr>")
+        .next()
+        .unwrap();
+    assert!(second_row.contains("<strong>echo</strong>"));
+    assert!(second_row.contains("<code>/hello</code>"));
     assert!(
         daemon
             .success(&["apps", "list"])
             .contains("first\t/replacement")
     );
     daemon.success(&["remove", "first"]);
-    assert!(http(&address, "GET", "/replacement/hello").starts_with("HTTP/1.1 404"));
+    let page = admin.page();
+    assert!(!page.contains(">first</th>"));
+    assert!(page.contains(">second</th>"));
+    assert!(!page.contains("<code>/updated-hello</code>"));
+    assert!(http(&address, "GET", "/replacement/updated-hello").starts_with("HTTP/1.1 404"));
     assert_eq!(
         daemon.success(&["apps", "list"]),
         "second\t/apps/one-more\n"
@@ -1394,6 +1646,12 @@ fn deploy_built_examples(directory: &std::path::Path) {
             .success()
     );
     fs::remove_file(first.directory.join(".wr/components/greet.wasm")).unwrap();
+    assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
+    let page = admin.page();
+    assert!(page.contains(">first</th>"));
+    assert!(page.contains("<code>/</code>"));
+    assert!(page.contains("<strong>greet</strong><span><code>GET</code> <code>/hello</code>"));
+    admin.stop("-TERM");
     assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
     daemon.success(&["daemon", "stop"]);
     let address = daemon.start();

@@ -1,3 +1,4 @@
+mod admin;
 mod application;
 mod apps;
 mod daemon;
@@ -29,6 +30,7 @@ enum Command {
     Daemon(daemon::Daemon),
     Apps(apps::Apps),
     Remove(apps::Remove),
+    Admin(admin::Admin),
 }
 
 pub fn execute() -> Result<()> {
@@ -43,6 +45,7 @@ pub fn execute() -> Result<()> {
         Command::Daemon(command) => command.execute(cli.state_dir),
         Command::Apps(command) => command.execute(cli.state_dir),
         Command::Remove(command) => command.execute(cli.state_dir),
+        Command::Admin(command) => command.execute(cli.state_dir),
     }
 }
 

@@ -21,6 +21,7 @@ guest workspaces.
 | [Daemon](src/daemon/mod.rs) | Compose the application registry and listeners; coordinate readiness and shutdown |
 | [Process lifecycle](src/daemon/process.rs) | Background launch, singleton lock, private state paths, readiness handshake, and cleanup |
 | [Control](src/control) | Shared wire protocol, client transport, and management request handlers |
+| [Admin command](src/cli/admin.rs), [admin UI](src/admin) | Select a daemon and own a separate local HTTP listener, live metadata queries, and HTML presentation |
 | [Applications](src/hosting/applications.rs) | Prepare, publish, list, and remove application generations |
 | [Routing](src/hosting/routing.rs) | Construct and validate each application’s prepared Rocket routes |
 | [Hosting server](src/hosting/server.rs) | Translate HTTP, bound execution admission, and drain shutdown |
@@ -108,6 +109,30 @@ for a readiness line from the child after both binds. The child runs in its own
 process group with terminal input disconnected and diagnostics appended to its
 log. Unix control transport is length-framed JSON with bounded message sizes,
 concurrency, and read/write deadlines. Deployment state is deliberately volatile.
+
+## Local admin UI
+
+The foreground `wr admin` client owns a loopback Rocket listener independently
+of the daemon. Each overview request uses the existing status protocol over
+the selected Unix socket; the daemon remains the source of metadata and does
+not render HTML. Application hosting and its root mounts are unaffected.
+Application metadata includes function names, methods, and relative paths read
+from each active Rocket dispatcher. This keeps inspection tied to the published
+generation without retaining a second copy of deployment metadata or component
+bytes. Functions are sorted by name before being returned over control transport.
+
+The control client provides synchronous transport for existing CLI commands
+and asynchronous transport for HTTP handlers, sharing wire encoding and reply
+validation. The UI bounds the complete async exchange with a deadline;
+cancellation drops the socket instead of leaving a blocked worker behind.
+There is no metadata cache or polling task. The CLI owns process signals and
+readiness reporting; the UI server owns rendering and HTTP responses.
+
+Rocket's HTML responder wraps a small embedded page shell and directly rendered,
+escaped status and table content. The stylesheet is also embedded. This single
+view needs no template-engine dependency, frontend build, runtime asset files,
+or separate browser API. Exact behavior lives in the
+[admin reference](docs/reference.md#admin-ui).
 
 ## Guest workspace boundary
 
