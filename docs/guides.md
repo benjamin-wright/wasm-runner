@@ -29,7 +29,7 @@ wr run examples
 ```
 
 Build should report `.wr/components/status.wasm`. After the readiness message,
-call `curl http://127.0.0.1:8080/status` in another terminal. Stop and restart
+call `curl http://127.0.0.1:8080/demo/status` in another terminal. Stop and restart
 the server after changing routes or rebuilding components.
 You can also build an unlisted source without giving it a route. See
 [source discovery](reference.md#source-discovery) for filename rules and the
@@ -175,18 +175,18 @@ wr build examples
 wr run examples --listen 127.0.0.1:9001
 ```
 
-In another terminal, `/misbehave/ok` should always return `1`, demonstrating
-fresh guest state. `/misbehave/trap` and `/misbehave/invalid` return 500;
-`/misbehave/loop` returns 504 after the execution allowance. Subsequent
-`/misbehave/ok` requests should still succeed:
+In another terminal, `/demo/misbehave/ok` should always return `1`, demonstrating
+fresh guest state. `/demo/misbehave/trap` and `/demo/misbehave/invalid` return 500;
+`/demo/misbehave/loop` returns 504 after the execution allowance. Subsequent
+`/demo/misbehave/ok` requests should still succeed:
 
 ```sh
-curl -i http://127.0.0.1:9001/misbehave/ok
-curl -i http://127.0.0.1:9001/misbehave/trap
-curl -i http://127.0.0.1:9001/misbehave/invalid
-curl -i http://127.0.0.1:9001/misbehave/loop
-curl -i http://127.0.0.1:9001/misbehave/ok
-seq 20 | xargs -P20 -I{} curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9001/misbehave/loop
+curl -i http://127.0.0.1:9001/demo/misbehave/ok
+curl -i http://127.0.0.1:9001/demo/misbehave/trap
+curl -i http://127.0.0.1:9001/demo/misbehave/invalid
+curl -i http://127.0.0.1:9001/demo/misbehave/loop
+curl -i http://127.0.0.1:9001/demo/misbehave/ok
+seq 20 | xargs -P20 -I{} curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9001/demo/misbehave/loop
 ```
 
 With the default 16 execution slots, simultaneous looping requests should show
@@ -196,9 +196,9 @@ client: its execution slot remains occupied until the guest times out. These
 concurrency and shutdown checks are manual rather than timing-sensitive tests.
 
 To check request-body timeouts, use a client that pauses during a body upload to
-`/echo`, leaving bytes outstanding after the handler starts reading. Expect 408
+`/demo/echo`, leaving bytes outstanding after the handler starts reading. Expect 408
 when the [body-reading allowance](reference.md#run) expires, then verify a normal
-`/hello` request still succeeds. Header handling uses Rocket's transport defaults
+`/demo/hello` request still succeeds. Header handling uses Rocket's transport defaults
 and is separate from this timeout.
 
 ## Manage multiple applications
@@ -212,17 +212,17 @@ wr apps list
 wr daemon status
 ```
 
-Build another application in its own directory, give it a distinct manifest
-`name` and nonconflicting HTTP routes, then run `wr deploy <DIRECTORY>`. Both
-applications use the same hosting address. Names identify applications; deploying
-the same name replaces its complete set of routes and component bytes.
+Build another application in its own directory, give it a distinct `name` and
+a nonoverlapping `path-prefix` in its manifest, then run `wr deploy <DIRECTORY>`.
+Both applications use the same hosting address. Names identify applications; deploying
+the same name replaces its declared prefix, routes, and component bytes atomically.
 
-After changing an application's source or routes:
+After changing an application's source, routes, or `path-prefix`:
 
 ```sh
 wr build examples
 wr deploy examples
-curl http://127.0.0.1:9000/hello
+curl http://127.0.0.1:9000/demo/hello
 ```
 
 If deployment fails, correct the reported component or route error and redeploy;
@@ -244,7 +244,7 @@ consistently on every command and a different hosting port. See the
 limits, and failure behavior.
 
 To manually verify generation lifetime, deploy the example, start a request to
-`/misbehave/loop`, then redeploy or remove `hello` while it executes. The admitted
+`/demo/misbehave/loop`, then redeploy or remove `hello` while it executes. The admitted
 request should still end with 504 at its deadline; new requests use the new
 routes (or return 404 after removal). To check shutdown draining, start the same
 loop and run `wr daemon stop` while it executes. Stop should wait for that

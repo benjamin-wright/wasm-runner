@@ -32,7 +32,7 @@ pub(crate) async fn serve(
         listen,
         ..Config::default()
     };
-    let applications = Applications::new(config.clone()).await?;
+    let applications = Applications::new(config.clone())?;
     let (stop, stopped) = watch::channel(false);
     let (ready, address) = oneshot::channel();
     let mut host_stopped = stopped.clone();

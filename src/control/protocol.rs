@@ -1,4 +1,4 @@
-use crate::hosting::server::Handler;
+use crate::hosting::{applications::ApplicationInfo, server::Handler};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,8 @@ pub(crate) const MAX_MESSAGE: usize = 128 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Deployment {
     pub name: String,
+    #[serde(rename = "path-prefix")]
+    pub path_prefix: String,
     pub handlers: Vec<Handler>,
 }
 
@@ -58,10 +60,10 @@ pub(crate) enum Reply {
     Status {
         pid: u32,
         listen: std::net::SocketAddr,
-        applications: Vec<String>,
+        applications: Vec<ApplicationInfo>,
     },
     Applications {
-        names: Vec<String>,
+        applications: Vec<ApplicationInfo>,
     },
     Error {
         message: String,

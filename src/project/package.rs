@@ -12,6 +12,7 @@ pub(crate) fn deployment(
     let handlers = load_handlers(&application)?;
     Ok(crate::control::protocol::Deployment {
         name: application.name,
+        path_prefix: application.path_prefix,
         handlers,
     })
 }

@@ -4,7 +4,10 @@ use std::{
     path::PathBuf,
 };
 
-use crate::hosting::server::{self, Config};
+use crate::hosting::{
+    applications::Applications,
+    server::{self, Config},
+};
 use anyhow::Result;
 use clap::Args;
 
@@ -38,12 +41,17 @@ impl Run {
                 #[cfg(unix)]
                 let mut interrupt =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-                server::serve(
-                    Config {
-                        listen: self.listen,
-                        ..Config::default()
-                    },
-                    handlers,
+                let config = Config {
+                    listen: self.listen,
+                    ..Config::default()
+                };
+                let applications = Applications::new(config.clone())?;
+                applications
+                    .install(application.name.clone(), application.path_prefix, handlers)
+                    .await?;
+                server::serve_applications(
+                    config,
+                    applications,
                     async {
                         #[cfg(unix)]
                         tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }

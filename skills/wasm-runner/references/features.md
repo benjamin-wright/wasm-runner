@@ -20,7 +20,7 @@ Handler request fields are:
 | Field | Rust type and meaning |
 | --- | --- |
 | `method` | `String`, HTTP method |
-| `path` | `String`, encoded request path |
+| `path` | `String`, encoded application-relative request path after prefix removal |
 | `path_params` | `Vec<(String, String)>`, decoded named captures |
 | `query` | `Vec<(String, Vec<String>)>`, form-decoded keys with grouped values |
 | `headers` | `Vec<(String, String)>`, including repeated header values |
@@ -44,6 +44,7 @@ inside that function. For example:
 
 ```yaml
 name: my-app
+path-prefix: /my-app
 dependencies:
   serde: {version: "1.0", features: ["derive"]}
 functions:
@@ -97,7 +98,7 @@ receive 503; requests that exceed execution time receive 504.
 | Run reports missing/incompatible component | Rebuild the application with the installed `wr`, then redeploy (or restart foreground serving). |
 | Run rejects imports | Check dependency and handler use of unsupported capabilities. |
 | No readiness message | Read the startup error; check the manifest, conflicting routes, and whether the listen port is already in use. |
-| HTTP 404 | Check both method and path against the configured routes. |
+| HTTP 404 | Check the declared path-prefix, method, and application-relative route. |
 | HTTP 413 / 408 | Request body too large / body reading timed out. |
 | HTTP 503 / 504 | Execution capacity unavailable or server shutting down / handler execution timed out. |
 | HTTP 500 | Inspect the server terminal for a handler failure or invalid response; the handler may also deliberately return 500. |

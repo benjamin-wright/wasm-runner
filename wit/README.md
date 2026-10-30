@@ -32,7 +32,8 @@ trait and delegates to this function. Build uses ordinary Cargo with the
 ## Request and response
 
 The handler receives a complete request and returns a complete response.
-Requests contain a method, encoded path, decoded named path captures, grouped
+Requests contain a method, encoded application-relative path (the mount prefix
+is removed), decoded named path captures, grouped
 form-decoded query values, headers, and body. Each query key appears once with
 its values in encounter order. See [HTTP translation](../docs/reference.md#run). Responses
 contain a `u16` status, headers, and body. Bodies are byte lists; headers are

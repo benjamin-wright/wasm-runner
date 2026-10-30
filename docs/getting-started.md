@@ -36,7 +36,7 @@ because it lives beneath this checkout.
 
 The [examples directory](../examples) is an application directory:
 
-- [application.yaml](../examples/application.yaml) names the application `hello`
+- [application.yaml](../examples/application.yaml) names the application `hello`, mounts it at `/demo`,
   and configures greeting, JSON echo, request-inspection, and deliberately
   misbehaving routes.
 - [functions/greet.rs](../examples/functions/greet.rs) returns a greeting.
@@ -109,9 +109,9 @@ Deployed hello
 Then call the hosting listener:
 
 ```sh
-curl http://127.0.0.1:9000/hello
-curl -H 'Content-Type: application/json' -d '{"hello":"world"}' http://127.0.0.1:9000/echo
-curl 'http://127.0.0.1:9000/users/42/orders?status=open&tag=a&tag=b'
+curl http://127.0.0.1:9000/demo/hello
+curl -H 'Content-Type: application/json' -d '{"hello":"world"}' http://127.0.0.1:9000/demo/echo
+curl 'http://127.0.0.1:9000/demo/users/42/orders?status=open&tag=a&tag=b'
 ```
 
 Expect `Hello, world!`, the echoed JSON object, and a JSON request description
@@ -127,7 +127,7 @@ If components are missing, run the build step first. See the
 
 Change the greeting bytes in [greet.rs](../examples/functions/greet.rs), then run
 `wr build examples` again. The component is rebuilt and published at the same
-path. With the daemon running, run `wr deploy examples`, then call `/hello`
+path. With the daemon running, run `wr deploy examples`, then call `/demo/hello`
 to see the new response. A failed deployment leaves the previous application active.
 See [managing multiple applications](guides.md#manage-multiple-applications).
 

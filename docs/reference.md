@@ -24,7 +24,7 @@ Clean does not load a manifest.
 | `wr daemon status` | Query the live daemon's PID, hosting address, and deployed applications. |
 | `wr daemon stop` | Stop accepting work, drain executions, and wait for the daemon to release its listeners and process lock. |
 | `wr deploy <DIRECTORY>` | Upload existing built components and atomically create or replace the named application. |
-| `wr apps list` | Print deployed application names in sorted order, one per line. |
+| `wr apps list` | Print name and path prefix separated by a tab, one application per line, sorted by name. |
 | `wr remove <NAME>` | Remove the application's routes; already selected generations remain alive until their requests finish. |
 
 Daemon operations accept the global `--state-dir <DIRECTORY>` option. See
@@ -35,11 +35,36 @@ Arguments after `wr` go directly to the application.
 
 ## Manifest
 
-An application has a name and a nonempty map of named functions. Every configured
-function declares an HTTP method/path pair. See the complete
+An application has a name, a required `path-prefix`, and a nonempty map of named
+functions. Every configured function declares an HTTP method/path pair. See the complete
 [example manifest](../examples/application.yaml). Application and function names
 are lowercase identifiers of 1 to 64 letters, digits, or hyphens, starting with
 a letter.
+
+`path-prefix` is the application's mount point for both `wr run` and `wr deploy`.
+Use `/` for root hosting or a slash followed by nonempty literal segments, such
+as `/demo` or `/api/orders`. Segments may contain ASCII letters, digits, `-`, `_`,
+`.`, and `~`, but cannot be `.` or `..`. Trailing or repeated slashes, percent
+encoding, whitespace, query strings, fragments, and dynamic captures are rejected.
+Missing prefixes are errors: existing manifests must add an explicit prefix
+(use `/` to preserve their original URLs). There is no CLI prefix override or
+implicit default, and every deployment takes its prefix from the submitted manifest.
+
+Prefixes match the encoded request path literally and case-sensitively on whole
+segment boundaries, before function routing. `/demo` matches `/demo` and
+`/demo/hello`, but not `/demolition/hello` or `/%64emo/hello`. The mount is removed
+before Rocket routes the request; an exact mount request becomes `/`. The
+remaining encoded path and original query are preserved. Function paths in the
+manifest and the path seen by handlers are application-relative. For example,
+`path-prefix: /demo` plus `http.path: /hello` serves `/demo/hello`, and the handler
+receives `/hello`. Rocket's slash handling below applies after mount selection.
+
+Distinct applications cannot own equal or nested prefixes, even if their
+function routes differ. `/api` conflicts with `/api/orders`, while `/api/orders`
+and `/api/users` may coexist. `/` overlaps every prefix, so it can only be used
+by the sole deployed application. Identical function routes in nonoverlapping
+applications are valid. Prefix conflicts fail deployment atomically, preserving
+all existing applications.
 
 The [JSON Schema draft-07 document](../application.schema.json) defines field
 constraints and supported methods. Unknown fields are rejected. `http.path`
@@ -115,7 +140,7 @@ A schema-valid manifest alone does not guarantee that setup or build succeeds.
 | Discovery and generation | setup, build, update | Validate discovered source names and require sources; reject reserved or conflicting dependencies; merge ignore rules and validate editor settings. |
 | Workspace writing | setup without `--dry-run`, build, update | Refuse a handwritten root Cargo manifest before any writes; then create or update generated files. |
 | Server preparation | run | Read every configured component, validate imports and the guest contract, compile native code, let Rocket reject route collisions, then bind the listener. |
-| Deployment preparation | deploy | Read configured components, upload routes and bytes, then let the daemon validate and compile components and reject combined route collisions before publishing. |
+| Deployment preparation | deploy | Read configured components, upload routes and bytes, then let the daemon validate and compile components and reject internal route collisions and overlapping application prefixes before publishing. |
 | Compilation and publication | build | Cargo checks Rust and dependencies; after successful compilation, require every expected artifact before copying components. |
 | Dependency update | update | Cargo resolves dependency versions allowed by the generated manifests and writes the application lockfile. |
 | Cleanup | clean | Require an existing directory and check root Cargo manifest ownership before any removals. |
@@ -280,6 +305,7 @@ implicit exposure beyond the default loopback address.
 
 The library's async `server::serve(config, handlers, shutdown_future, on_ready)`
 accepts component bytes without a CLI or manifest, inside a Tokio runtime.
+This embedding entry point hosts at `/`; the CLI honors the manifest prefix.
 The readiness callback receives the bound address; the future returns after
 shutdown and draining admitted executions.
 Only the CLI installs process signal handlers (Ctrl-C and SIGTERM on Unix).
@@ -300,7 +326,7 @@ nonterminating guest code with approximately 5 ms tick/checkpoint granularity.
 Shutdown stops execution admission, gracefully stops HTTP workers, and drains
 admitted jobs before releasing the runtime and its ticker.
 
-The guest receives Rocket's encoded request path, decoded named captures, and
+The guest receives the encoded application-relative path after prefix removal, decoded named captures, and
 form-decoded query pairs. Each decoded key appears once, in first-occurrence
 order, with values in encounter order. Empty/absent queries yield no pairs;
 `?flag` and `?flag=` both yield an empty string value. `+` decodes to a space;
@@ -409,22 +435,23 @@ and SIGTERM use the same shutdown path. Stopping an absent daemon fails.
 
 `deploy` loads the manifest and configured sources using the usual validation,
 then reads existing component files. It neither runs Cargo nor generates files.
-The control payload contains the manifest's application name, named method/path
-routes, and component bytes; source paths and build dependencies are not sent.
+The control payload contains the manifest's application name, required
+`path-prefix`, named method/path routes, and component bytes; source paths and
+build dependencies are not sent.
 The server independently validates names, methods, route syntax, component
-compatibility, and combined route collisions. Application and handler names use
-the manifest identifier constraints. At least one handler is required.
+compatibility, internal route collisions, and prefix ownership. Application and
+handler names use the manifest identifier constraints. At least one handler is required.
 
 Application names are deployment identities: deploying an existing name replaces
-its complete route/component set, and renaming it creates another application.
-All applications share one route namespace with the existing Rocket ranking and
-collision rules. Prepare/compile and route validation finish before atomic
-publication. Failure leaves every active application unchanged. Concurrent
-changes are serialized at publication and validated against the latest set.
+its complete prefix/route/component set, and renaming it creates another application.
+Function routes use Rocket ranking and collision rules within each application.
+Preparation, compilation, route validation, and prefix ownership checks finish
+before atomic publication. Failure leaves every active application unchanged. Concurrent
+changes are checked and published under the registry lock against the latest set.
 An acknowledged deployment is active for subsequent requests; a lost connection
 can leave its outcome unknown, so inspect/redeploy before assuming failure.
 
-Each request retains its selected routing generation until completion. Old
+Each request retains its selected application generation until completion. Old
 components are released once no active registry or request references them.
 Removal returns after route publication, without waiting for prior requests.
 `remove` of an unknown name fails. The execution limits in [Run](#run) apply
@@ -434,11 +461,13 @@ Deleting local build outputs does not affect deployed component bytes.
 The control transport uses one request and response per Unix connection. Each
 message is a four-byte big-endian byte length followed by UTF-8 JSON, capped at
 128 MiB including JSON encoding. The request's `command` is `deploy`, `remove`,
-`list`, `status`, or `stop`. Deploy includes `application: {name, handlers}`, where
+`list`, `status`, or `stop`. Deploy includes `application: {name, path-prefix, handlers}`, where
 each handler contains `name`, `method`, `path`, and `component` (an array of byte
 values). Remove includes `name`. Responses use `result: ok`, `applications`
-(with `names`), `status` (with `pid`, `listen`, and `applications`), or `error`
-(with `message`). Four control requests may run concurrently; excess connections
+(with `applications`), `status` (with `pid`, `listen`, and `applications`), or `error`
+(with `message`). Both application lists contain objects with `name` and
+`path-prefix` fields. CLI status displays the prefix beside each application name.
+Four control requests may run concurrently; excess connections
 are closed. Client reads time out after 120 seconds; a timeout does not cancel a
 server-side deployment. The control socket is local administration, not a remote
 or multi-user authentication API.
@@ -446,3 +475,7 @@ or multi-user authentication API.
 Deployments are held only in memory. Each new daemon process begins empty; redeploy
 the desired applications after a stop, crash, or restart. The state directory
 contains lifecycle files and logs, not persisted application configuration.
+
+After upgrading from a version without path prefixes, restart the daemon so
+the CLI and control server use the same deployment and listing formats. Add an
+explicit `path-prefix` to each manifest before redeploying.

@@ -31,6 +31,8 @@ pub(crate) struct DependencyDetails {
 #[derive(Deserialize)]
 pub(crate) struct ApplicationDefinition {
     pub name: String,
+    #[serde(rename = "path-prefix")]
+    pub path_prefix: String,
     #[serde(default)]
     pub dependencies: Dependencies,
     pub functions: HashMap<String, FunctionDefinition>,

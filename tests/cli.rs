@@ -6,6 +6,7 @@ use std::{
 };
 
 const EXAMPLE: &str = include_str!("fixtures/application.yaml");
+const MOUNTED_APPLICATION: &str = include_str!("fixtures/mounted/application.yaml");
 const SETUP_APPLICATION: &str = include_str!("fixtures/setup/application.yaml");
 const GREET_FUNCTION: &str = include_str!("../examples/functions/greet.rs");
 const ECHO_FUNCTION: &str = include_str!("../examples/functions/echo.rs");
@@ -522,7 +523,7 @@ fn run_requires_built_compatible_components_before_readiness() {
 fn setup_accepts_distinct_routes_and_supported_methods() {
     for method in ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
         let source = format!(
-            "name: routes\nfunctions:\n  get:\n    http: {{method: {method}, path: '/users/<id>'}}\n  post:\n    http: {{method: POST, path: /same}}\n  slash:\n    http: {{method: GET, path: /same/}}\n"
+            "name: routes\npath-prefix: /\nfunctions:\n  get:\n    http: {{method: {method}, path: '/users/<id>'}}\n  post:\n    http: {{method: POST, path: /same}}\n  slash:\n    http: {{method: GET, path: /same/}}\n"
         );
         let fixture = ManifestFixture::new(&source);
         let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
@@ -553,7 +554,7 @@ fn yaml_strings_preserve_literal_values() {
 
 #[test]
 fn yaml_aliases_and_merges_are_validated_after_resolution() {
-    let source = "name: !!str on\nfunctions:\n  greet: &handler\n    http: {method: GET, path: /hello}\n  echo:\n    <<: *handler\n    http: {method: POST, path: /echo}\n";
+    let source = "name: !!str on\npath-prefix: /\nfunctions:\n  greet: &handler\n    http: {method: GET, path: /hello}\n  echo:\n    <<: *handler\n    http: {method: POST, path: /echo}\n";
     let fixture = ManifestFixture::new(source);
     let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
     assert!(
@@ -619,7 +620,7 @@ fn invalid_manifests_fail_before_printing_metadata() {
         ),
         (EXAMPLE.replace("name: hello", "name: ''"), &["/name"][..]),
         (
-            String::from("name: hello\nfunctions: {}"),
+            String::from("name: hello\npath-prefix: /\nfunctions: {}"),
             &["functions"][..],
         ),
         (
@@ -678,9 +679,9 @@ fn invalid_manifests_fail_before_printing_metadata() {
 fn missing_and_wrong_typed_fields_are_rejected() {
     for source in [
         String::from("[]"),
-        String::from("name: hello\nfunctions: null"),
+        String::from("name: hello\npath-prefix: /\nfunctions: null"),
         EXAMPLE.replace("name: hello", ""),
-        String::from("name: hello\nfunctions: []"),
+        String::from("name: hello\npath-prefix: /\nfunctions: []"),
         EXAMPLE.replace("name: hello", "name: true"),
         EXAMPLE.replace("greet:", "true:"),
         EXAMPLE.replace("greet:", "greet:\n    module: 42"),
@@ -1141,6 +1142,7 @@ fn http(address: &str, method: &str, path: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
+    use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
     let daemon = DaemonFixture::new();
     assert!(!daemon.call(&["daemon", "status"]).status.success());
@@ -1156,6 +1158,40 @@ fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
     let address = daemon.start();
     assert!(http(&address, "GET", "/").starts_with("HTTP/1.1 404"));
     let state = daemon.directory.join("d");
+    // The control server must enforce prefixes even when no manifest loader is involved.
+    for prefix in [None, Some("/invalid/../mount")] {
+        let mut application = serde_json::json!({
+            "name": "direct", "handlers": [{"name": "greet", "method": "GET", "path": "/", "component": []}]
+        });
+        if let Some(prefix) = prefix {
+            application["path-prefix"] = prefix.into();
+        }
+        let bytes = serde_json::to_vec(
+            &serde_json::json!({"command": "deploy", "application": application}),
+        )
+        .unwrap();
+        let mut socket =
+            std::os::unix::net::UnixStream::connect(state.join("control.sock")).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .unwrap();
+        socket.write_all(&bytes).unwrap();
+        let mut size = [0; 4];
+        socket.read_exact(&mut size).unwrap();
+        let mut bytes = vec![0; u32::from_be_bytes(size) as usize];
+        socket.read_exact(&mut bytes).unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["result"], "error");
+        assert!(
+            response["message"]
+                .as_str()
+                .unwrap()
+                .contains("path-prefix")
+        );
+    }
     assert_eq!(
         fs::metadata(&state).unwrap().permissions().mode() & 0o777,
         0o700
@@ -1197,28 +1233,83 @@ fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
 fn deploy_built_examples(directory: &std::path::Path) {
     let daemon = DaemonFixture::new();
     let address = daemon.start();
-    let first = ManifestFixture::new(
-        "name: first\nfunctions:\n  greet:\n    http: { method: GET, path: /first }\n",
-    );
+    let first = ManifestFixture::new(MOUNTED_APPLICATION);
     let second = ManifestFixture::new(
-        "name: second\nfunctions:\n  greet:\n    http: { method: GET, path: /second }\n",
+        &MOUNTED_APPLICATION
+            .replace("name: first", "name: second")
+            .replace("/apps/one", "/apps/one-more"),
     );
     for application in [&first, &second] {
         let components = application.directory.join(".wr/components");
         fs::create_dir_all(&components).unwrap();
-        fs::copy(
-            directory.join(".wr/components/greet.wasm"),
-            components.join("greet.wasm"),
-        )
-        .unwrap();
+        for (name, source) in [
+            ("greet", "greet"),
+            ("root", "greet"),
+            ("inspect", "inspect"),
+            ("files", "inspect"),
+            ("echo", "echo"),
+        ] {
+            fs::copy(
+                directory.join(format!(".wr/components/{source}.wasm")),
+                components.join(format!("{name}.wasm")),
+            )
+            .unwrap();
+        }
         daemon.success(&["deploy", application.directory.to_str().unwrap()]);
     }
+    serve_prefixed_foreground(&first);
     assert_eq!(daemon.start(), address);
-    assert_eq!(daemon.success(&["apps", "list"]), "first\nsecond\n");
-    for path in ["/first", "/second"] {
-        assert!(http(&address, "GET", path).ends_with("Hello, world!"));
+    assert_eq!(
+        daemon.success(&["apps", "list"]),
+        "first\t/apps/one\nsecond\t/apps/one-more\n"
+    );
+    assert!(
+        daemon
+            .success(&["daemon", "status"])
+            .contains("first\t/apps/one")
+    );
+    for prefix in ["/apps/one", "/apps/one-more"] {
+        for suffix in ["", "/", "/hello"] {
+            assert!(http(&address, "GET", &format!("{prefix}{suffix}")).ends_with("Hello, world!"));
+        }
+        let response = http(&address, "HEAD", &format!("{prefix}/hello"));
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("content-length: 13\r\n")
+        );
+        assert!(response.ends_with("\r\n\r\n"));
+        let response = http(
+            &address,
+            "GET",
+            &format!("{prefix}/users/a%2Fb/orders?tag=a&tag=b&plus=%2B+"),
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["path"], "/users/a%2Fb/orders");
+        assert_eq!(body["path_params"], serde_json::json!([["user_id", "a/b"]]));
+        assert_eq!(
+            body["query"],
+            serde_json::json!([["tag", ["a", "b"]], ["plus", ["+ "]]])
+        );
+        assert!(http(&address, "GET", &format!("{prefix}/files/a/b%20c")).contains("a/b c"));
+        assert!(http(&address, "POST", &format!("{prefix}/echo")).starts_with("HTTP/1.1 400"));
+        assert!(http(&address, "GET", &format!("{prefix}/echo")).starts_with("HTTP/1.1 404"));
     }
-    // Invalid component replacement and route collisions leave both applications intact.
+    for path in [
+        "/hello",
+        "/apps/on",
+        "/apps/ones/hello",
+        "/apps/%6Fne/hello",
+        "/apps/one/missing",
+    ] {
+        assert!(
+            http(&address, "GET", path).starts_with("HTTP/1.1 404"),
+            "{path}"
+        );
+    }
+
     fs::write(
         first.directory.join(".wr/components/greet.wasm"),
         b"invalid",
@@ -1230,46 +1321,173 @@ fn deploy_built_examples(directory: &std::path::Path) {
             .status
             .success()
     );
-    assert!(http(&address, "GET", "/first").ends_with("Hello, world!"));
+    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
     fs::copy(
         directory.join(".wr/components/greet.wasm"),
         first.directory.join(".wr/components/greet.wasm"),
     )
     .unwrap();
-    let original = fs::read_to_string(&first.path).unwrap();
-    fs::write(&first.path, original.replace("/first", "/second")).unwrap();
+
+    // A small candidate keeps prefix-conflict checks from recompiling unrelated handlers.
+    let greeting = "name: first\npath-prefix: /apps/one\nfunctions:\n  greet:\n    http: {method: GET, path: /hello}\n";
+    // Equal, descendant, ancestor, and root mounts conflict even with independent routers.
+    for prefix in ["/apps/one-more", "/apps/one-more/nested", "/apps", "/"] {
+        fs::write(&first.path, greeting.replace("/apps/one", prefix)).unwrap();
+        let output = daemon.call(&["deploy", first.directory.to_str().unwrap()]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps"));
+        assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
+        assert!(http(&address, "GET", "/apps/one-more/hello").ends_with("Hello, world!"));
+    }
+    // Conflicting routes inside one application still fail before replacing its mount.
+    fs::write(
+        &first.path,
+        MOUNTED_APPLICATION.replace("path: /}", "path: /hello}"),
+    )
+    .unwrap();
     assert!(
         !daemon
             .call(&["deploy", first.directory.to_str().unwrap()])
             .status
             .success()
     );
-    assert!(http(&address, "GET", "/first").ends_with("Hello, world!"));
-    assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
 
-    fs::write(&first.path, original.replace("/first", "/replacement")).unwrap();
+    fs::write(
+        &first.path,
+        MOUNTED_APPLICATION.replace("/apps/one", "/replacement"),
+    )
+    .unwrap();
     std::thread::scope(|scope| {
         let requests = scope.spawn(|| {
             for _ in 0..40 {
-                assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+                assert!(http(&address, "GET", "/apps/one-more/hello").ends_with("Hello, world!"));
             }
         });
         daemon.success(&["deploy", first.directory.to_str().unwrap()]);
         requests.join().unwrap();
     });
-    assert!(http(&address, "GET", "/first").starts_with("HTTP/1.1 404"));
-    assert!(http(&address, "GET", "/replacement").ends_with("Hello, world!"));
-    assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+    assert!(http(&address, "GET", "/apps/one/hello").starts_with("HTTP/1.1 404"));
+    assert!(http(&address, "GET", "/replacement/hello").ends_with("Hello, world!"));
+    assert!(
+        daemon
+            .success(&["apps", "list"])
+            .contains("first\t/replacement")
+    );
     daemon.success(&["remove", "first"]);
-    assert!(http(&address, "GET", "/replacement").starts_with("HTTP/1.1 404"));
-    assert_eq!(daemon.success(&["apps", "list"]), "second\n");
+    assert!(http(&address, "GET", "/replacement/hello").starts_with("HTTP/1.1 404"));
+    assert_eq!(
+        daemon.success(&["apps", "list"]),
+        "second\t/apps/one-more\n"
+    );
     assert!(!daemon.call(&["remove", "missing"]).status.success());
-    // Deployment owns bytes, not paths back to the submitted project.
-    fs::remove_file(second.directory.join(".wr/components/greet.wasm")).unwrap();
-    assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+
+    // A sole application may take the root mount; no other mount can coexist with it.
+    fs::write(&first.path, MOUNTED_APPLICATION.replace("/apps/one", "/")).unwrap();
+    daemon.success(&["remove", "second"]);
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
+    assert!(
+        !daemon
+            .call(&["deploy", second.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    fs::remove_file(first.directory.join(".wr/components/greet.wasm")).unwrap();
+    assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
     daemon.success(&["daemon", "stop"]);
     let address = daemon.start();
     assert!(daemon.success(&["apps", "list"]).is_empty());
-    assert!(http(&address, "GET", "/second").starts_with("HTTP/1.1 404"));
+    assert!(http(&address, "GET", "/hello").starts_with("HTTP/1.1 404"));
     daemon.success(&["daemon", "stop"]);
+}
+
+#[test]
+fn manifests_require_literal_canonical_path_prefixes() {
+    let invalid = [
+        "",
+        "relative",
+        "/trailing/",
+        "//double",
+        "/a//b",
+        "/.",
+        "/a/../b",
+        "/a/./b",
+        "/<capture>",
+        "/a?b=c",
+        "/a#b",
+        "/a%2Fb",
+        "/two words",
+        "/café",
+    ];
+    for prefix in invalid {
+        let fixture = ManifestFixture::new(
+            &EXAMPLE.replace("path-prefix: /", &format!("path-prefix: '{prefix}'")),
+        );
+        let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
+        assert!(!output.status.success(), "{prefix:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("path-prefix"));
+        assert!(!fixture.directory.join(".wr").exists());
+    }
+    let fixture = ManifestFixture::new(&EXAMPLE.replace("path-prefix: /\n", ""));
+    for command in ["setup", "run", "deploy"] {
+        let output = wr(&[command, fixture.directory.to_str().unwrap()]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("path-prefix"));
+    }
+    for prefix in ["/", "/api", "/api/v1", "/.well-known/a_b-1~2.3"] {
+        let fixture = ManifestFixture::new(
+            &EXAMPLE.replace("path-prefix: /", &format!("path-prefix: '{prefix}'")),
+        );
+        let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
+        assert!(
+            output.status.success(),
+            "{prefix:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[cfg(unix)]
+fn serve_prefixed_foreground(application: &ManifestFixture) {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Child, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    struct Running(Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut running = Running(
+        Command::new(env!("CARGO_BIN_EXE_wr"))
+            .arg("run")
+            .arg(&application.directory)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = running.0.stdout.take().unwrap();
+    let (sent, received) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if let Some(address) = line.strip_prefix("Listening on http://") {
+                let _ = sent.send(address.to_owned());
+                break;
+            }
+        }
+    });
+    let address = received
+        .recv_timeout(Duration::from_secs(30))
+        .expect("foreground readiness");
+    reader.join().unwrap();
+    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
+    assert!(http(&address, "GET", "/hello").starts_with("HTTP/1.1 404"));
 }

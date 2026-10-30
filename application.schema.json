@@ -3,10 +3,16 @@
   "title": "Wasm Runner application",
   "description": "An application of named WebAssembly functions with HTTP routes.",
   "type": "object",
-  "required": ["name", "functions"],
+  "required": ["name", "path-prefix", "functions"],
   "additionalProperties": false,
   "properties": {
     "name": { "$ref": "#/definitions/identifier" },
+    "path-prefix": {
+      "description": "Application mount path: / or literal unreserved segments, without trailing slash or dot segments.",
+      "type": "string",
+      "pattern": "^(/|(/[A-Za-z0-9._~-]+)+)$",
+      "not": { "pattern": "(^|/)\\.{1,2}(/|$)" }
+    },
     "dependencies": { "$ref": "#/definitions/dependencies" },
     "functions": {
       "type": "object",

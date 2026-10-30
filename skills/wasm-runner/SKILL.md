@@ -31,6 +31,7 @@ This path is an example; substitute the actual application path in commands.
 
 ```yaml
 name: my-app
+path-prefix: /my-app
 functions:
   greet:
     http:
@@ -88,13 +89,17 @@ remains available and stops with Ctrl-C.
 After readiness, use another terminal to verify the endpoint:
 
 ```sh
-curl -i http://127.0.0.1:9000/hello
+curl -i http://127.0.0.1:9000/my-app/hello
 ```
 
 Expect status 200 and `Hello, world!`. Stop with `wr daemon stop`.
 After source or manifest changes, rebuild and redeploy the application.
 Use `wr apps list` to inspect deployed names and `wr remove my-app` to remove one.
-Applications share the route space; conflicting deployments fail atomically.
+Every manifest requires `path-prefix`: use `/my-app` to mount this application
+or `/` for sole-application root hosting. Equal or nested prefixes conflict;
+different applications may use identical relative function routes. Conflicting
+deployments fail atomically. Prefixes are applied by both run and deploy;
+handlers receive application-relative paths, and there is no CLI prefix override.
 Daemon deployments are in memory, so redeploy after every daemon restart.
 Use a consistent `--state-dir <DIRECTORY>` when targeting an isolated daemon.
 There is no file watcher or automatic redeployment. The default listener is `127.0.0.1:8080`;

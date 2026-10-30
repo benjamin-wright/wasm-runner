@@ -34,11 +34,11 @@ impl Apps {
             let paths = Paths::new(directory)?;
             match self.command {
                 Command::List => {
-                    if let Reply::Applications { names } =
+                    if let Reply::Applications { applications } =
                         client::request(&paths.socket, Request::List)?
                     {
-                        for name in names {
-                            println!("{name}");
+                        for application in applications {
+                            println!("{}\t{}", application.name, application.path_prefix);
                         }
                     }
                 }

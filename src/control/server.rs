@@ -70,21 +70,25 @@ async fn connection(
             Request::Deploy { application } => {
                 application.validate()?;
                 applications
-                    .install(application.name, application.handlers)
+                    .install(
+                        application.name,
+                        application.path_prefix,
+                        application.handlers,
+                    )
                     .await?;
                 Ok(Reply::Ok)
             }
             Request::Remove { name } => {
-                applications.remove(&name).await?;
+                applications.remove(&name)?;
                 Ok(Reply::Ok)
             }
             Request::List => Ok(Reply::Applications {
-                names: applications.names(),
+                applications: applications.list(),
             }),
             Request::Status => Ok(Reply::Status {
                 pid: std::process::id(),
                 listen,
-                applications: applications.names(),
+                applications: applications.list(),
             }),
             Request::Stop => {
                 applications.stop();

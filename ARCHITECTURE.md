@@ -22,11 +22,11 @@ guest workspaces.
 | [Process lifecycle](src/daemon/process.rs) | Background launch, singleton lock, private state paths, readiness handshake, and cleanup |
 | [Control](src/control) | Shared wire protocol, client transport, and management request handlers |
 | [Applications](src/hosting/applications.rs) | Prepare, publish, list, and remove application generations |
-| [Routing](src/hosting/routing.rs) | Construct prepared Rocket routes and validate combined routing snapshots |
+| [Routing](src/hosting/routing.rs) | Construct and validate each application’s prepared Rocket routes |
 | [Hosting server](src/hosting/server.rs) | Translate HTTP, bound execution admission, and drain shutdown |
 | [Runtime](src/runtime.rs) | Compile components, own the engine/ticker, and invoke fresh isolated instances |
 
-Project tooling knows files and Cargo; deployment transfers identity, routes,
+Project tooling knows files and Cargo; deployment transfers identity, the declared path prefix, routes,
 and bytes without source paths. Control handlers call application operations;
 application hosting has no dependency on control transport or CLI types. The
 runtime remains independent of manifests and HTTP transport. These are concrete
@@ -42,9 +42,9 @@ flowchart TD
     Project --> Package[Deploy: read built component bytes]
     Package --> Control[Private control socket]
     Control --> Prepare[Prepare application runtime and routes]
-    Prepare --> Validate[Validate combined Rocket routing snapshot]
-    Validate --> Publish[Atomically publish snapshot]
-    HTTP[Hosting listener] --> Snapshot[Retain current snapshot]
+    Prepare --> Validate[Validate application routes and prefix ownership]
+    Validate --> Publish[Atomically publish application]
+    HTTP[Hosting listener] --> Snapshot[Select prefix and retain application]
     Snapshot --> Dispatch[Rocket routing and isolated execution]
     Daemon[Daemon lifecycle] --> HTTP
     Daemon --> Control
@@ -64,29 +64,40 @@ tracking. See [validation stages](docs/reference.md#validation-stages).
 
 ## Live applications and daemon lifecycle
 
-The application registry publishes immutable snapshots containing a sorted map
-of application routes and an untracked asynchronous Rocket local client. Each
-application generation owns one runtime; cloned routes retain that runtime.
-Preparation runs on the blocking pool without holding the publication lock.
-A single async mutation lock serializes combining the candidate with the latest
-applications, validating Rocket routes, and publishing under a short read/write
-lock. Failed candidates never replace active state. The stopping flag is checked
-under that same publication lock so shutdown cannot race a late publication.
+The application registry holds a sorted map of names to immutable application
+generations. Each generation owns its declared path prefix, one runtime, and an
+untracked asynchronous Rocket local client. Component preparation runs on the
+blocking pool, and that application's routes are validated before publication.
+A short read/write lock protects checking prefix ownership against the latest
+registry and replacing the application. Duplicate and ancestor/descendant
+prefixes are rejected. Shutdown checks use the same lock, so a late deployment
+cannot publish after admission closes. Old generations are dropped outside the
+lock. Independent application routers remove the need to rebuild a combined
+router or serialize asynchronous preparation across applications.
 
-The network listener forwards bounded requests into the selected snapshot's
-in-process Rocket dispatcher. Rocket's route matcher is private and its live
-route set is immutable; local dispatch lets Rocket continue to own ranking,
-collisions, captures, and HEAD behavior without implementing a second router.
+The network listener selects an application using its literal, segment-bounded
+prefix, removes that prefix, and forwards the remaining encoded path and original
+query into the application's in-process Rocket dispatcher. `/` is the remaining
+path for a request exactly at the mount point. Prefixes are canonical unreserved
+ASCII paths; there are no dynamic prefix captures or encoded aliases. Function
+routing, decoding, ranking, and collision detection remain Rocket's responsibility.
+The manifest owns the prefix for both run and deployment. Neither command
+infers it from the name, accepts an override flag, or retains an old prefix.
+
+Rocket's route matcher is private and its live route set is immutable; local
+dispatch preserves its behavior without implementing a second function router.
 It opens no additional listening sockets. The tradeoff is an additional bounded
 request-buffer copy and response adaptation. Clients are untracked so cookies
 are not shared between requests. HEAD forwarding preserves the representation
 size even though local dispatch has already stripped its body.
 
-The listener and every snapshot share one execution-admission state. Requests
-retain their snapshot through dispatch; blocking executions also own the
-selected runtime. Replaced/removed generations are reclaimed after the final
+The listener and every application share one execution-admission state. Requests
+retain the selected application through dispatch; blocking executions also own
+its runtime. Replaced/removed generations are reclaimed after the final
 reference drops. Per-generation runtimes avoid changing the public runtime API,
-at the cost of an engine and ticker per deployed application generation.
+at the cost of an engine and ticker per deployed application generation. The
+public `server::serve` embedding API remains rooted at `/`; the foreground CLI
+uses the same registry and hosting path with the manifest's prefix.
 
 The daemon owns both listeners and shuts down the other if either fails. Its
 process-held file lock covers stale-socket cleanup through final shutdown; it
@@ -170,12 +181,12 @@ arbitrary host functions. A registration allowlist and capability-free WASI
 contexts limit the current host surface to the
 [documented policy](docs/reference.md#runtime-and-wasi-policy).
 
-The snapshot dispatcher registers each configured URI directly as a Rocket route
+Each application dispatcher registers each configured URI directly as a Rocket route
 with its default rank. Rocket owns routing, method matching, collision detection, and
 slash handling. There is no parallel route ordering or overlap algorithm.
 The small capture adapter pairs names from the matched route with Rocket's
-decoded request segments for the WIT request. The encoded path comes from
-Rocket's request URI. The hosting listener's liftoff callback reports the actual bound address
+decoded request segments for the WIT request. The encoded application-relative path comes from
+Rocket's local request URI after prefix removal. The hosting listener's liftoff callback reports the actual bound address
 only after ignition and binding succeed.
 
 Each request buffers a bounded body under a read timeout before attempting an

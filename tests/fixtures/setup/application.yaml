@@ -1,4 +1,5 @@
 name: hello
+path-prefix: /
 
 dependencies:
   anyhow: "1.0"

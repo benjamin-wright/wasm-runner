@@ -83,8 +83,8 @@ impl Daemon {
                             "Daemon running (PID {pid})\nListening on http://{listen}\nApplications: {}",
                             applications.len()
                         );
-                        for name in applications {
-                            println!("{name}");
+                        for application in applications {
+                            println!("{}\t{}", application.name, application.path_prefix);
                         }
                     }
                 }

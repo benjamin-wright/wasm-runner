@@ -77,8 +77,10 @@ pub async fn serve(
     shutdown: impl Future<Output = ()>,
     on_ready: impl FnOnce(SocketAddr) + Send + Sync + 'static,
 ) -> Result<()> {
-    let applications = Applications::new(config.clone()).await?;
-    applications.install("application".into(), handlers).await?;
+    let applications = Applications::new(config.clone())?;
+    applications
+        .install("application".into(), "/".into(), handlers)
+        .await?;
     serve_applications(config, applications, shutdown, on_ready).await
 }
 
@@ -193,14 +195,19 @@ impl rocket::route::Handler for Gateway {
         if state.stopping.load(Ordering::SeqCst) {
             return Outcome::Success(empty_response(Status::ServiceUnavailable));
         }
-        let snapshot = applications.snapshot();
+        let Some((application, mut uri)) = applications.select(request.uri().path().as_str())
+        else {
+            return Outcome::Forward((data, Status::NotFound));
+        };
+        if let Some(query) = request.uri().query() {
+            uri.push('?');
+            uri.push_str(query.as_str());
+        }
         let body = match read_body(data, &state.config).await {
             Ok(body) => body,
             Err(status) => return Outcome::Success(empty_response(status)),
         };
-        let mut local = snapshot
-            .client
-            .req(request.method(), request.uri().to_string());
+        let mut local = application.client.req(request.method(), uri);
         for header in request.headers().iter() {
             local = local.header(rocket::http::Header::new(
                 header.name().to_string(),

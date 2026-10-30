@@ -23,7 +23,7 @@ explicitly update dependencies, build components with locked dependencies by
 default, serve configured HTTP endpoints, and clean generated outputs.
 A reusable synchronous runtime and a CLI-independent HTTP server support
 embedding applications as well as the CLI. On Unix, a background daemon hosts
-multiple applications on one HTTP listener, with a private control socket for
+multiple applications at declarative, nonoverlapping path prefixes on one HTTP listener, with a private control socket for
 atomic deployment, listing, removal, status, and shutdown. Deployments are
 in-memory and must be resubmitted after restarting the daemon.
 Source discovery is independent of route configuration, within the
@@ -59,7 +59,8 @@ writes, removal, and publication are not promised to be transactional.
 | ID | Requirement | Observable acceptance condition and coverage |
 | --- | --- | --- |
 | R11 | Separate daemon lifecycle from application deployment. | `daemon start` returns after both listeners are bound, or succeeds by reporting an already running instance without changing its address or applications. `status` queries the live process, and `stop` waits for listener closure and execution draining. Failed startup leaves no new live daemon. `daemon_lifecycle_owns_both_listeners_and_restarts_empty` covers process lifecycle, repeated starts, failed binding, socket permissions, singleton ownership, and stale-socket recovery; the component-build workflow checks preservation of deployments on repeated start. Draining active executions remains a manual scenario. |
-| R12 | Host independently managed applications without interrupting unrelated routes. | A deployment contains identity, routes, and component bytes. Invalid components or conflicting routes leave all active applications unchanged. Replacement and removal affect future requests; requests already using a generation retain it. The component-build workflow covers two applications, failed and successful replacements, concurrent requests, removal, independence from source paths, and empty restart; replacing an executing generation remains a manual scenario. |
+| R12 | Host independently managed applications without interrupting unrelated routes. | A deployment contains identity, an explicit path prefix, routes, and component bytes. Invalid components, internal route collisions, or overlapping prefixes leave all active applications unchanged. Replacement and removal affect future requests; requests already using a generation retain it. The component-build workflow covers two applications, failed and successful replacements, concurrent requests, removal, independence from source paths, and empty restart; replacing an executing generation remains a manual scenario. |
+| R13 | Declare application mount points without deployment flags or retained defaults. | Every manifest requires a canonical `path-prefix`. Run and deploy serve application-relative routes beneath it and strip the prefix before guest execution. Different applications may share function paths but cannot have equal or nested prefixes. Listing/status show current prefixes. Prefix changes publish atomically with the application, and failures preserve old mounts. `manifests_require_literal_canonical_path_prefixes` covers input constraints; the component-build workflow covers prefix routing, capture/query preservation, boundaries, root mounts, conflicts, replacement, and removal. |
 
 ## Deliberate exclusions
 

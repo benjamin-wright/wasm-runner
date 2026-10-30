@@ -1,0 +1,13 @@
+name: first
+path-prefix: /apps/one
+functions:
+  greet:
+    http: {method: GET, path: /hello}
+  root:
+    http: {method: GET, path: /}
+  inspect:
+    http: {method: GET, path: '/users/<user_id>/orders'}
+  files:
+    http: {method: GET, path: '/files/<path..>'}
+  echo:
+    http: {method: POST, path: /echo}
