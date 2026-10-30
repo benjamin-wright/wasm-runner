@@ -2,7 +2,7 @@
 name = "wasm-runner"
 version = "0.1.0"
 edition = "2024"
-description = "Build and serve WebAssembly HTTP function components"
+description = "Build, deploy, and host WebAssembly HTTP applications"
 publish = false
 
 [[bin]]
@@ -19,7 +19,7 @@ jsonschema = { version = "0.60", default-features = false }
 rocket = { version = "0.5.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "io-util"] }
 toml = "0.9"
 wasmtime = { version = "38.0.4", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "38.0.4", default-features = false, features = ["p2"] }

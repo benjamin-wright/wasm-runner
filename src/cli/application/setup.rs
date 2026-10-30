@@ -7,11 +7,11 @@ use std::{
 use anyhow::Result;
 use clap::Args;
 
-use crate::services::{manifest, workspace};
+use crate::project::{manifest, workspace};
 
 /// Generate a Cargo workspace for source functions
 #[derive(Args)]
-pub(super) struct Setup {
+pub(crate) struct Setup {
     /// Application directory containing application.yaml
     #[arg(value_name = "DIRECTORY")]
     directory: PathBuf,
@@ -22,8 +22,8 @@ pub(super) struct Setup {
 }
 
 impl Setup {
-    pub(super) fn execute(self) -> Result<()> {
-        let directory = super::resolve_directory(&self.directory)?;
+    pub(crate) fn execute(self) -> Result<()> {
+        let directory = crate::cli::resolve_directory(&self.directory)?;
         let application = manifest::load(&directory)?;
         let functions = workspace::discover_functions(&directory)?;
         let files = workspace::generate(&directory, &application, &functions)?;

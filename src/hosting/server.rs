@@ -17,12 +17,13 @@ use rocket::{
     Data, Request as HttpRequest, Response as HttpResponse, Route,
     data::ToByteUnit,
     fairing::AdHoc,
-    http::{Status, uri::Origin},
+    http::{Method, Status},
     route::Outcome,
 };
 use tokio::sync::Semaphore;
 
-use super::runtime::{ExecutionError, ModuleId, Request, Response, Runtime};
+use super::applications::Applications;
+use crate::runtime::{ExecutionError, ModuleId, Request, Response, Runtime};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -45,6 +46,8 @@ impl Default for Config {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Handler {
     pub name: String,
     pub method: String,
@@ -52,17 +55,17 @@ pub struct Handler {
     pub component: Vec<u8>,
 }
 
-struct State {
-    runtime: Runtime,
+pub(super) struct State {
     config: Config,
     slots: Arc<Semaphore>,
-    stopping: AtomicBool,
+    pub(super) stopping: AtomicBool,
 }
 
 #[derive(Clone)]
-struct RegisteredHandler {
-    name: String,
-    module: Arc<ModuleId>,
+pub(super) struct RegisteredHandler {
+    pub(super) name: String,
+    pub(super) module: Arc<ModuleId>,
+    pub(super) runtime: Arc<Runtime>,
 }
 
 /// Prepare and serve components inside a Tokio runtime. Rocket validates route
@@ -74,54 +77,32 @@ pub async fn serve(
     shutdown: impl Future<Output = ()>,
     on_ready: impl FnOnce(SocketAddr) + Send + Sync + 'static,
 ) -> Result<()> {
-    ensure!(
-        config.max_concurrent_executions > 0
-            && config.max_concurrent_executions <= u32::MAX as usize,
-        "execution concurrency must be between 1 and {}",
-        u32::MAX
-    );
-    ensure!(
-        !config.request_timeout.is_zero(),
-        "request timeout must be positive"
-    );
-    let mut runtime = Runtime::new(config.execution_timeout)?;
-    let mut routes = Vec::new();
-    for handler in handlers {
-        // Route::new panics on invalid URIs; use Rocket's fallible parser first.
-        Origin::parse_route(&handler.path).map_err(|error| {
-            anyhow::anyhow!(
-                "handler {}: invalid route {}: {error}",
-                handler.name,
-                handler.path
-            )
-        })?;
-        let method = handler.method.parse().map_err(|()| {
-            anyhow::anyhow!(
-                "handler {}: invalid method {}",
-                handler.name,
-                handler.method
-            )
-        })?;
-        let module = runtime
-            .register(&handler.component)
-            .with_context(|| format!("registering handler {} ({})", handler.name, handler.path))?;
-        let mut route = Route::new(
-            method,
-            &handler.path,
-            RegisteredHandler {
-                name: handler.name.clone(),
-                module: Arc::new(module),
-            },
-        );
-        route.name = Some(handler.name.into());
-        routes.push(route);
-    }
-    let state = Arc::new(State {
-        runtime,
-        slots: Arc::new(Semaphore::new(config.max_concurrent_executions)),
-        stopping: AtomicBool::new(false),
-        config: config.clone(),
-    });
+    let applications = Applications::new(config.clone()).await?;
+    applications.install("application".into(), handlers).await?;
+    serve_applications(config, applications, shutdown, on_ready).await
+}
+
+pub(crate) async fn serve_applications(
+    config: Config,
+    applications: Arc<Applications>,
+    shutdown: impl Future<Output = ()>,
+    on_ready: impl FnOnce(SocketAddr) + Send + Sync + 'static,
+) -> Result<()> {
+    let state = applications.state.clone();
+    let routes = [
+        Method::Get,
+        Method::Head,
+        Method::Post,
+        Method::Put,
+        Method::Patch,
+        Method::Delete,
+        Method::Options,
+        Method::Trace,
+        Method::Connect,
+    ]
+    .into_iter()
+    .map(|method| Route::new(method, "/<path..>", Gateway))
+    .collect::<Vec<_>>();
     // Configure directly so Rocket.toml and environment variables cannot override
     // the embedding application's settings or install process signal handlers.
     let rocket = rocket::custom(rocket::Config {
@@ -142,7 +123,7 @@ pub async fn serve(
         },
         ..rocket::Config::default()
     })
-    .manage(state.clone())
+    .manage(applications.clone())
     .mount("/", routes)
     .attach(AdHoc::on_liftoff("Report readiness", move |rocket| {
         Box::pin(async move {
@@ -162,17 +143,97 @@ pub async fn serve(
     let result = tokio::select! {
         result = &mut server => result,
         () = shutdown => {
-            state.stopping.store(true, Ordering::SeqCst);
+            applications.stop();
             handle.notify();
             server.await
         }
     };
-    state.stopping.store(true, Ordering::SeqCst);
+    applications.stop();
     let _drained = state
         .slots
         .acquire_many(state.config.max_concurrent_executions as u32)
         .await?;
     result.map(|_| ()).context("running HTTP server")
+}
+
+impl State {
+    pub(super) fn new(config: Config) -> Result<Arc<Self>> {
+        ensure!(
+            config.max_concurrent_executions > 0
+                && config.max_concurrent_executions <= u32::MAX as usize,
+            "invalid execution concurrency"
+        );
+        ensure!(
+            !config.request_timeout.is_zero(),
+            "request timeout must be positive"
+        );
+        ensure!(
+            !config.execution_timeout.is_zero(),
+            "execution timeout must be positive"
+        );
+        Ok(Arc::new(Self {
+            slots: Arc::new(Semaphore::new(config.max_concurrent_executions)),
+            config,
+            stopping: AtomicBool::new(false),
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct Gateway;
+
+#[rocket::async_trait]
+impl rocket::route::Handler for Gateway {
+    async fn handle<'r>(&self, request: &'r HttpRequest<'_>, data: Data<'r>) -> Outcome<'r> {
+        let applications = request
+            .rocket()
+            .state::<Arc<Applications>>()
+            .expect("applications");
+        let state = &applications.state;
+        if state.stopping.load(Ordering::SeqCst) {
+            return Outcome::Success(empty_response(Status::ServiceUnavailable));
+        }
+        let snapshot = applications.snapshot();
+        let body = match read_body(data, &state.config).await {
+            Ok(body) => body,
+            Err(status) => return Outcome::Success(empty_response(status)),
+        };
+        let mut local = snapshot
+            .client
+            .req(request.method(), request.uri().to_string());
+        for header in request.headers().iter() {
+            local = local.header(rocket::http::Header::new(
+                header.name().to_string(),
+                header.value().to_string(),
+            ));
+        }
+        let response = local.body(body).dispatch().await;
+        let mut builder = HttpResponse::build();
+        builder.status(response.status());
+        for header in response.headers().iter() {
+            builder.raw_header_adjoin(header.name().to_string(), header.value().to_string());
+        }
+        // Local dispatch strips HEAD bodies but retains their representation size.
+        let size = response.body().preset_size();
+        let body = response.into_bytes().await.unwrap_or_default();
+        builder.sized_body(size.unwrap_or(body.len()), Cursor::new(body));
+        Outcome::Success(builder.finalize())
+    }
+}
+
+async fn read_body(data: Data<'_>, config: &Config) -> Result<Vec<u8>, Status> {
+    match tokio::time::timeout(
+        config.request_timeout,
+        data.open((config.max_request_body as u64).bytes())
+            .into_bytes(),
+    )
+    .await
+    {
+        Err(_) => Err(Status::RequestTimeout),
+        Ok(Err(_)) => Err(Status::BadRequest),
+        Ok(Ok(body)) if !body.is_complete() => Err(Status::PayloadTooLarge),
+        Ok(Ok(body)) => Ok(body.into_inner()),
+    }
 }
 
 #[rocket::async_trait]
@@ -196,17 +257,9 @@ async fn dispatch(
     if state.stopping.load(Ordering::SeqCst) {
         return empty_response(Status::ServiceUnavailable);
     }
-    let body = match tokio::time::timeout(
-        state.config.request_timeout,
-        data.open((state.config.max_request_body as u64).bytes())
-            .into_bytes(),
-    )
-    .await
-    {
-        Err(_) => return empty_response(Status::RequestTimeout),
-        Ok(Err(_)) => return empty_response(Status::BadRequest),
-        Ok(Ok(body)) if !body.is_complete() => return empty_response(Status::PayloadTooLarge),
-        Ok(Ok(body)) => body.into_inner(),
+    let body = match read_body(data, &state.config).await {
+        Ok(body) => body,
+        Err(status) => return empty_response(status),
     };
     let headers = request
         .headers()
@@ -276,7 +329,7 @@ async fn dispatch(
     let execution = tokio::task::spawn_blocking(move || {
         // The blocking job owns admission even if its request future is dropped.
         let _slot = slot;
-        state.runtime.execute(&handler.module, &guest_request)
+        handler.runtime.execute(&handler.module, &guest_request)
     })
     .await;
     match execution {

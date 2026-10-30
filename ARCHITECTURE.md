@@ -7,60 +7,96 @@ live in [Contributing](CONTRIBUTING.md).
 
 ## Structure
 
-The runner is a single Rust package with a library and a thin CLI binary.
-The library owns the CLI modules and a single service module tree; the binary
-calls its CLI entry point. Runtime and server modules are publicly re-exported
-for embedding, while the other service modules remain internal. Application
-handlers compile in separate generated guest workspaces.
+The runner is one Rust package with a library and a thin CLI binary. Modules
+are grouped by responsibility; the runtime and foreground server remain publicly
+re-exported for embedding. Application handlers compile in separate generated
+guest workspaces.
 
 | Component | Responsibility |
 | --- | --- |
 | [main](src/main.rs) | Report errors and return the process exit status |
-| [CLI parser](src/cli/mod.rs) | Parse top-level arguments and dispatch commands |
-| [setup](src/cli/setup.rs), [build](src/cli/build.rs), [update](src/cli/update.rs), [clean](src/cli/clean.rs), [run](src/cli/run.rs) | Keep each command's arguments, orchestration, and presentation together |
-| [Manifest service](src/services/manifest.rs) | Own application/dependency types, load and validate YAML, parse route URIs with Rocket, check configured sources, and resolve component paths |
-| [Workspace service](src/services/workspace.rs) | Discover sources, select dependencies, render workspace files, merge user configuration, write generated files, and clean owned outputs |
-| [Build service](src/services/build.rs) | Invoke Cargo for locked builds or explicit dependency updates and publish components from deterministic artifact paths |
-| [Component loader](src/services/loader.rs) | Read configured component files with function/path diagnostics |
-| [Runtime](src/services/runtime.rs) | Compile and validate components, own the engine/ticker, and invoke fresh isolated instances |
-| [HTTP server](src/services/server.rs) | Register Rocket routes, translate HTTP, bound execution admission, and drain shutdown |
+| [CLI](src/cli/mod.rs) | Parse arguments and dispatch commands |
+| [Application commands](src/cli/application), [daemon commands](src/cli/daemon.rs), [application management](src/cli/apps.rs) | Command orchestration and presentation |
+| [Project](src/project) | Manifest validation, source discovery, workspace generation, Cargo invocation, and packaging existing component bytes |
+| [Daemon](src/daemon/mod.rs) | Compose the application registry and listeners; coordinate readiness and shutdown |
+| [Process lifecycle](src/daemon/process.rs) | Background launch, singleton lock, private state paths, readiness handshake, and cleanup |
+| [Control](src/control) | Shared wire protocol, client transport, and management request handlers |
+| [Applications](src/hosting/applications.rs) | Prepare, publish, list, and remove application generations |
+| [Routing](src/hosting/routing.rs) | Construct prepared Rocket routes and validate combined routing snapshots |
+| [Hosting server](src/hosting/server.rs) | Translate HTTP, bound execution admission, and drain shutdown |
+| [Runtime](src/runtime.rs) | Compile components, own the engine/ticker, and invoke fresh isolated instances |
 
-Services are independent of CLI argument types and presentation. They return
-results for commands to present; Cargo's diagnostics pass through directly.
-This keeps application operations reusable without introducing generic provider
-or trigger frameworks.
+Project tooling knows files and Cargo; deployment transfers identity, routes,
+and bytes without source paths. Control handlers call application operations;
+application hosting has no dependency on control transport or CLI types. The
+runtime remains independent of manifests and HTTP transport. These are concrete
+modules rather than provider traits or separate crates.
 
 ## Important flows
 
 ```mermaid
 flowchart TD
-    CLI[CLI command] --> Load[Load and validate manifest]
-    Load --> Read[Run: read component files]
-    Read --> Prepare[Validate routes and register components]
-    Prepare --> Bind[Bind listener and announce readiness]
-    Bind --> Serve[Dispatch HTTP requests to isolated executions]
-    Load --> Discover[Discover source functions]
-    Discover --> Generate[Generate files in memory]
-    Generate --> Preview[Setup dry-run: print preview]
-    Generate --> Write[Check ownership and write changed files]
-    Write --> Setup[Setup: report workspace]
-    Write --> Cargo[Build: invoke Cargo]
-    Write --> Update[Update: resolve dependencies and write lockfile]
-    Cargo --> Publish[Check all artifacts, then copy components]
-    CLI --> Clean[Clean: check ownership and remove generated outputs]
+    CLI[CLI command] --> Project[Load manifest and project inputs]
+    Project --> Generate[Setup/build/update: generate guest workspace]
+    Generate --> Cargo[Build/update: invoke Cargo]
+    Project --> Package[Deploy: read built component bytes]
+    Package --> Control[Private control socket]
+    Control --> Prepare[Prepare application runtime and routes]
+    Prepare --> Validate[Validate combined Rocket routing snapshot]
+    Validate --> Publish[Atomically publish snapshot]
+    HTTP[Hosting listener] --> Snapshot[Retain current snapshot]
+    Snapshot --> Dispatch[Rocket routing and isolated execution]
+    Daemon[Daemon lifecycle] --> HTTP
+    Daemon --> Control
 ```
 
-Setup, build, update, and run load the manifest once within their command workflows.
-Clean only needs the directory, allowing recovery from invalid or missing
-application inputs. Run loads existing components without generating files or
-invoking Cargo. Native compilation belongs to runtime registration, not loading.
+Setup, build, update, run, and deploy load the manifest once within their command
+workflows. Clean only needs the directory, allowing recovery from invalid or
+missing inputs. Run and deploy read existing components without generating
+files or invoking Cargo. Native compilation belongs to runtime preparation.
 
 YAML parsing and merge resolution use `yaml_serde`. The resolved document is
 validated by `jsonschema` against the embedded schema and deserialized into
-application types. Rocket parses route URIs; its ignition phase detects route
-collisions when starting the server. Source existence needs filesystem checks.
-Library diagnostics receive basic operation context through `anyhow`; custom source-location
-tracking is not part of the design. See [validation stages](docs/reference.md#validation-stages).
+application types. Rocket parses route URIs and rejects route collisions during
+dispatcher ignition. Source existence needs filesystem checks. Diagnostics use
+basic operation context through `anyhow`; there is no custom source-location
+tracking. See [validation stages](docs/reference.md#validation-stages).
+
+## Live applications and daemon lifecycle
+
+The application registry publishes immutable snapshots containing a sorted map
+of application routes and an untracked asynchronous Rocket local client. Each
+application generation owns one runtime; cloned routes retain that runtime.
+Preparation runs on the blocking pool without holding the publication lock.
+A single async mutation lock serializes combining the candidate with the latest
+applications, validating Rocket routes, and publishing under a short read/write
+lock. Failed candidates never replace active state. The stopping flag is checked
+under that same publication lock so shutdown cannot race a late publication.
+
+The network listener forwards bounded requests into the selected snapshot's
+in-process Rocket dispatcher. Rocket's route matcher is private and its live
+route set is immutable; local dispatch lets Rocket continue to own ranking,
+collisions, captures, and HEAD behavior without implementing a second router.
+It opens no additional listening sockets. The tradeoff is an additional bounded
+request-buffer copy and response adaptation. Clients are untracked so cookies
+are not shared between requests. HEAD forwarding preserves the representation
+size even though local dispatch has already stripped its body.
+
+The listener and every snapshot share one execution-admission state. Requests
+retain their snapshot through dispatch; blocking executions also own the
+selected runtime. Replaced/removed generations are reclaimed after the final
+reference drops. Per-generation runtimes avoid changing the public runtime API,
+at the cost of an engine and ticker per deployed application generation.
+
+The daemon owns both listeners and shuts down the other if either fails. Its
+process-held file lock covers stale-socket cleanup through final shutdown; it
+never trusts a recorded PID or unlinks the lock file. The start command first
+queries live status and reports an existing instance without spawning a child.
+For a new instance, background start waits
+for a readiness line from the child after both binds. The child runs in its own
+process group with terminal input disconnected and diagnostics appended to its
+log. Unix control transport is length-framed JSON with bounded message sizes,
+concurrency, and read/write deadlines. Deployment state is deliberately volatile.
 
 ## Guest workspace boundary
 
@@ -134,12 +170,12 @@ arbitrary host functions. A registration allowlist and capability-free WASI
 contexts limit the current host surface to the
 [documented policy](docs/reference.md#runtime-and-wasi-policy).
 
-The server registers each configured URI directly as a Rocket route with its
-default rank. Rocket owns routing, method matching, collision detection, and
+The snapshot dispatcher registers each configured URI directly as a Rocket route
+with its default rank. Rocket owns routing, method matching, collision detection, and
 slash handling. There is no parallel route ordering or overlap algorithm.
 The small capture adapter pairs names from the matched route with Rocket's
 decoded request segments for the WIT request. The encoded path comes from
-Rocket's request URI. Rocket's liftoff callback reports the actual bound address
+Rocket's request URI. The hosting listener's liftoff callback reports the actual bound address
 only after ignition and binding succeed.
 
 Each request buffers a bounded body under a read timeout before attempting an

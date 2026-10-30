@@ -6,19 +6,19 @@ use std::{
 use anyhow::Result;
 use clap::Args;
 
-use crate::services::{build, manifest, workspace};
+use crate::project::{build, manifest, workspace};
 
 /// Update application dependencies to the newest compatible versions without building
 #[derive(Args)]
-pub(super) struct Update {
+pub(crate) struct Update {
     /// Application directory containing application.yaml
     #[arg(value_name = "DIRECTORY")]
     directory: PathBuf,
 }
 
 impl Update {
-    pub(super) fn execute(self) -> Result<()> {
-        let directory = super::resolve_directory(&self.directory)?;
+    pub(crate) fn execute(self) -> Result<()> {
+        let directory = crate::cli::resolve_directory(&self.directory)?;
         let application = manifest::load(&directory)?;
         let functions = workspace::discover_functions(&directory)?;
         let files = workspace::generate(&directory, &application, &functions)?;

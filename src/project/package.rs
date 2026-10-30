@@ -1,9 +1,20 @@
 use std::fs;
 
-use super::server::Handler;
+use crate::hosting::server::Handler;
 use anyhow::{Context, Result};
 
 use super::manifest::ApplicationDefinition;
+
+pub(crate) fn deployment(
+    directory: &std::path::Path,
+) -> Result<crate::control::protocol::Deployment> {
+    let application = super::manifest::load(directory)?;
+    let handlers = load_handlers(&application)?;
+    Ok(crate::control::protocol::Deployment {
+        name: application.name,
+        handlers,
+    })
+}
 
 pub(crate) fn load_handlers(application: &ApplicationDefinition) -> Result<Vec<Handler>> {
     let mut functions = application.functions.iter().collect::<Vec<_>>();

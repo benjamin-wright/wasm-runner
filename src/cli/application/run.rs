@@ -4,15 +4,15 @@ use std::{
     path::PathBuf,
 };
 
-use crate::services::server::{self, Config};
+use crate::hosting::server::{self, Config};
 use anyhow::Result;
 use clap::Args;
 
-use crate::services::{loader, manifest};
+use crate::project::{manifest, package};
 
 /// Serve an application's previously built HTTP components
 #[derive(Args)]
-pub(super) struct Run {
+pub(crate) struct Run {
     /// Application directory containing application.yaml
     #[arg(value_name = "DIRECTORY")]
     directory: PathBuf,
@@ -23,10 +23,10 @@ pub(super) struct Run {
 }
 
 impl Run {
-    pub(super) fn execute(self) -> Result<()> {
-        let directory = super::resolve_directory(&self.directory)?;
+    pub(crate) fn execute(self) -> Result<()> {
+        let directory = crate::cli::resolve_directory(&self.directory)?;
         let application = manifest::load(&directory)?;
-        let handlers = loader::load_handlers(&application)?;
+        let handlers = package::load_handlers(&application)?;
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?

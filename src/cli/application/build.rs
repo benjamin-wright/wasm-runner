@@ -6,11 +6,11 @@ use std::{
 use anyhow::Result;
 use clap::Args;
 
-use crate::services::{build, manifest, workspace};
+use crate::project::{build, manifest, workspace};
 
 /// Build HTTP function components from functions/*.rs
 #[derive(Args)]
-pub(super) struct Build {
+pub(crate) struct Build {
     /// Application directory containing application.yaml
     #[arg(value_name = "DIRECTORY")]
     directory: PathBuf,
@@ -25,8 +25,8 @@ pub(super) struct Build {
 }
 
 impl Build {
-    pub(super) fn execute(self) -> Result<()> {
-        let directory = super::resolve_directory(&self.directory)?;
+    pub(crate) fn execute(self) -> Result<()> {
+        let directory = crate::cli::resolve_directory(&self.directory)?;
         let application = manifest::load(&directory)?;
         let functions = workspace::discover_functions(&directory)?;
         let files = workspace::generate(&directory, &application, &functions)?;

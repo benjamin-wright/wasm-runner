@@ -7,9 +7,11 @@ application authors working with Rust handlers and HTTP route configuration.
 `wr setup` prepares a guest Cargo workspace, `wr update` creates or refreshes
 the application's dependency lockfile, `wr build` compiles components using
 locked dependencies by default, and `wr clean` removes generated files and build
-outputs. After building,
-`wr run` serves configured handlers on `127.0.0.1:8080` by default. The library
-also exposes a reusable component runtime and HTTP server.
+outputs. On Unix, `wr daemon start` starts a background host and `wr deploy`
+adds or replaces applications without restarting it. `wr apps list`, `wr remove`,
+and `wr daemon status`/`stop` manage the running host. Deployments are held in
+memory. `wr run` remains available for foreground serving. The hosting listener
+defaults to `127.0.0.1:8080`; the library exposes a reusable runtime and HTTP server.
 
 ## Get started
 

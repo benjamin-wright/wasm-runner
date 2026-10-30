@@ -61,7 +61,7 @@ both globally and locally for one function. Supported values are version strings
 or objects with `version`, optional `features`, and optional `default-features`.
 Path, Git, and optional dependency declarations are unsupported. `wit-bindgen`
 is reserved and managed by the runner. After changing dependencies, run
-`wr update <DIRECTORY>`, review the lockfile changes, then build and restart.
+`wr update <DIRECTORY>`, review the lockfile changes, then build and redeploy (or restart foreground serving).
 
 Choose dependencies that work within the application capabilities below.
 A dependency can compile successfully but still prevent the application from
@@ -94,11 +94,11 @@ receive 503; requests that exceed execution time receive 504.
 | Setup rejects editor settings | Repair invalid JSONC or a non-string-array `rust-analyzer.vfs.extraIncludes`, preserving unrelated settings. |
 | Build reports a missing or outdated lockfile | Run `wr update <DIRECTORY>` for intentional dependency or function-list changes, or to create a new lockfile; review it and build again. Use `--unlocked` only to explicitly allow lockfile changes during a build. |
 | Cargo compilation fails | Read Cargo's diagnostics against the original sources and YAML dependencies. Previously published components remain unchanged. |
-| Run reports missing/incompatible component | Rebuild the application with the installed `wr`, then restart. |
+| Run reports missing/incompatible component | Rebuild the application with the installed `wr`, then redeploy (or restart foreground serving). |
 | Run rejects imports | Check dependency and handler use of unsupported capabilities. |
 | No readiness message | Read the startup error; check the manifest, conflicting routes, and whether the listen port is already in use. |
 | HTTP 404 | Check both method and path against the configured routes. |
 | HTTP 413 / 408 | Request body too large / body reading timed out. |
 | HTTP 503 / 504 | Execution capacity unavailable or server shutting down / handler execution timed out. |
 | HTTP 500 | Inspect the server terminal for a handler failure or invalid response; the handler may also deliberately return 500. |
-| Old response after editing | Rebuild successfully, then restart the running server to load new components. |
+| Old response after editing | Rebuild successfully, then redeploy, or restart the foreground server, to load new components. |

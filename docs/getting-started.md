@@ -2,7 +2,7 @@
 
 This guide takes the checked-in example from Rust source to WebAssembly
 components and a running HTTP server. You need a local checkout of this repository
-and a shell. Run every command below from the **repository root**. Build and run are separate steps; restart the server after rebuilding.
+and a shell. Run every command below from the **repository root**. Build and deployment are separate steps; redeploy after rebuilding. The daemon workflow requires Unix.
 
 ## Prerequisites and installation
 
@@ -20,8 +20,8 @@ wr --help
 pinned Rust toolchain, Clippy, rustfmt, and `wasm32-wasip2` target. `make install`
 builds a release binary using the repository's [Cargo.lock](../Cargo.lock) and
 installs `wr` into Cargo's binary directory (normally `~/.cargo/bin`). Ensure
-that directory is on your `PATH`. Help should list `setup`, `build`, `update`, `clean`,
-and `run`.
+that directory is on your `PATH`. Help should list `setup`, `build`, `update`, `clean`, `run`,
+`daemon`, `deploy`, `apps`, and `remove`.
 
 Repeat `make install` to refresh the installed command after changes. Use
 `cargo uninstall wasm-runner` to remove it. Repository verification and the
@@ -91,17 +91,22 @@ lockfile changes and rebuild. See [dependency updates](reference.md#update).
 ## Serve the application
 
 ```sh
-wr run examples --listen 127.0.0.1:9000
+wr daemon start --listen 127.0.0.1:9000
+wr deploy examples
+wr daemon status
 ```
 
-After all components have been prepared and the listener bound, expect:
+Start returns after both listeners are bound. Deploy returns after all routes and
+components are prepared and active. The output includes:
 
 ```text
-Application: hello
+Daemon started
 Listening on http://127.0.0.1:9000
+...
+Deployed hello
 ```
 
-In another terminal:
+Then call the hosting listener:
 
 ```sh
 curl http://127.0.0.1:9000/hello
@@ -111,7 +116,10 @@ curl 'http://127.0.0.1:9000/users/42/orders?status=open&tag=a&tag=b'
 
 Expect `Hello, world!`, the echoed JSON object, and a JSON request description
 with `user_id` equal to `42` and the two `tag` values grouped together.
-Press Ctrl-C to stop accepting work and drain admitted executions.
+Run `wr daemon stop` to stop accepting work and drain admitted executions.
+Starting again begins with no applications; run `wr deploy examples` again.
+For foreground serving, use `wr run examples --listen 127.0.0.1:9000` instead
+of the daemon commands and stop it with Ctrl-C.
 If components are missing, run the build step first. See the
 [server reference](reference.md#run) for limits and errors.
 
@@ -119,7 +127,9 @@ If components are missing, run the build step first. See the
 
 Change the greeting bytes in [greet.rs](../examples/functions/greet.rs), then run
 `wr build examples` again. The component is rebuilt and published at the same
-path. Stop and restart `wr run examples`, then call `/hello` to see the new response.
+path. With the daemon running, run `wr deploy examples`, then call `/hello`
+to see the new response. A failed deployment leaves the previous application active.
+See [managing multiple applications](guides.md#manage-multiple-applications).
 
 Continue with [Common tasks](guides.md) to add a function, configure dependencies,
 prepare VS Code, make a locked build, or clean generated files.

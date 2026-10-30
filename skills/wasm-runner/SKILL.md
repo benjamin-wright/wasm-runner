@@ -19,8 +19,8 @@ For routing, dependencies, application capabilities, and troubleshooting, consul
 ## Create or extend an application
 
 Use a dedicated application directory containing `application.yaml` and
-`functions/`. Every `wr` subcommand takes this directory, not the manifest
-filename. Create these application files directly; `wr` manages the Cargo
+`functions/`. Application filesystem commands take this directory, not the manifest
+filename; daemon commands manage the shared host. Create these application files directly; `wr` manages the Cargo
 workspace. If an existing handwritten `Cargo.toml` blocks setup, preserve it
 and use a separate application directory.
 
@@ -72,14 +72,18 @@ application path:
 wr setup my-app --dry-run
 wr update my-app
 wr build my-app
-wr run my-app --listen 127.0.0.1:9000
+wr daemon start --listen 127.0.0.1:9000
+wr deploy my-app
+wr daemon status
 ```
 
 The optional preview displays the proposed workspace without writing or compiling.
 For a new application, `wr update` creates its dependency lockfile without building.
 `wr build` performs setup automatically and uses the locked versions. Expect a
 `Built` line for `.wr/components/greet.wasm`. Wait for `Listening on http://127.0.0.1:9000`
-before sending requests. `wr run` does not build missing or changed sources.
+and `Deployed my-app` before sending requests. Deploy does not build missing or changed sources.
+The daemon workflow requires Unix. For foreground serving, `wr run my-app`
+remains available and stops with Ctrl-C.
 
 After readiness, use another terminal to verify the endpoint:
 
@@ -87,9 +91,13 @@ After readiness, use another terminal to verify the endpoint:
 curl -i http://127.0.0.1:9000/hello
 ```
 
-Expect status 200 and `Hello, world!`. Stop with Ctrl-C.
-After source or manifest changes, rebuild and restart the server.
-There is no file watcher or hot reload. The default listener is `127.0.0.1:8080`;
+Expect status 200 and `Hello, world!`. Stop with `wr daemon stop`.
+After source or manifest changes, rebuild and redeploy the application.
+Use `wr apps list` to inspect deployed names and `wr remove my-app` to remove one.
+Applications share the route space; conflicting deployments fail atomically.
+Daemon deployments are in memory, so redeploy after every daemon restart.
+Use a consistent `--state-dir <DIRECTORY>` when targeting an isolated daemon.
+There is no file watcher or automatic redeployment. The default listener is `127.0.0.1:8080`;
 `--listen` requires a numeric IP and port, not a hostname.
 
 Builds are locked by default: a missing or outdated application lockfile is an
@@ -102,7 +110,7 @@ wr build my-app --release
 ```
 
 Keep the application's `Cargo.lock` in version control and review changes after
-update. Update leaves existing built components unchanged; rebuild and restart
+update. Update leaves existing built components unchanged; rebuild and redeploy
 to use new dependencies. `wr build my-app --unlocked` explicitly permits Cargo
 to create or adjust the lockfile during a build, without forcing upgrades of
 already-satisfied dependencies. Use `--release` for optimized builds. Debug and

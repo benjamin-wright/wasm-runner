@@ -200,3 +200,53 @@ To check request-body timeouts, use a client that pauses during a body upload to
 when the [body-reading allowance](reference.md#run) expires, then verify a normal
 `/hello` request still succeeds. Header handling uses Rocket's transport defaults
 and is separate from this timeout.
+
+## Manage multiple applications
+
+On Unix, start one daemon and deploy each built application to it:
+
+```sh
+wr daemon start --listen 127.0.0.1:9000
+wr deploy examples
+wr apps list
+wr daemon status
+```
+
+Build another application in its own directory, give it a distinct manifest
+`name` and nonconflicting HTTP routes, then run `wr deploy <DIRECTORY>`. Both
+applications use the same hosting address. Names identify applications; deploying
+the same name replaces its complete set of routes and component bytes.
+
+After changing an application's source or routes:
+
+```sh
+wr build examples
+wr deploy examples
+curl http://127.0.0.1:9000/hello
+```
+
+If deployment fails, correct the reported component or route error and redeploy;
+the old application remains active. No daemon restart is needed. To remove the
+example application (whose name is `hello`) or shut down the entire host:
+
+```sh
+wr remove hello
+wr daemon stop
+```
+
+Each new daemon process begins empty. Redeploy the desired applications after a
+restart. Repeating `wr daemon start` against a running daemon preserves its
+applications and reports its current address. `wr clean` affects local build
+outputs, not the running deployment.
+For separate development hosts use a private, short `--state-dir <DIRECTORY>`
+consistently on every command and a different hosting port. See the
+[daemon reference](reference.md#daemon-and-deployment) for state paths, logs,
+limits, and failure behavior.
+
+To manually verify generation lifetime, deploy the example, start a request to
+`/misbehave/loop`, then redeploy or remove `hello` while it executes. The admitted
+request should still end with 504 at its deadline; new requests use the new
+routes (or return 404 after removal). To check shutdown draining, start the same
+loop and run `wr daemon stop` while it executes. Stop should wait for that
+execution to finish before reporting success. Repeat with a disconnected client
+to check that its execution still holds capacity until the deadline.

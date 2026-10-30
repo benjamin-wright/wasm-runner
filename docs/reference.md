@@ -8,9 +8,10 @@ the authoritative field and guest-interface definitions.
 
 ## Commands
 
-All commands require an application directory, supplied as a relative or absolute
-path. Setup, build, update, and run read `application.yaml` inside it; alternate manifest
-filenames are not supported. Clean does not load a manifest.
+Application filesystem commands require an application directory, supplied as a
+relative or absolute path. Setup, build, update, run, and deploy read
+`application.yaml` inside it; alternate manifest filenames are not supported.
+Clean does not load a manifest.
 
 | Invocation | Behavior and options |
 | --- | --- |
@@ -19,6 +20,15 @@ filenames are not supported. Clean does not load a manifest.
 | `wr update <DIRECTORY>` | Refresh the workspace and create or update the guest lockfile to the newest compatible dependency versions, without building components. |
 | `wr clean <DIRECTORY>` | Remove generated workspace files and build outputs. |
 | `wr run <DIRECTORY> [--listen <IP:PORT>]` | Serve previously built handlers. The listener defaults to `127.0.0.1:8080`. |
+| `wr daemon start [--listen <IP:PORT>]` | Report an already running daemon, or start a Unix background daemon with an empty application registry. New instances default to `127.0.0.1:8080`. |
+| `wr daemon status` | Query the live daemon's PID, hosting address, and deployed applications. |
+| `wr daemon stop` | Stop accepting work, drain executions, and wait for the daemon to release its listeners and process lock. |
+| `wr deploy <DIRECTORY>` | Upload existing built components and atomically create or replace the named application. |
+| `wr apps list` | Print deployed application names in sorted order, one per line. |
+| `wr remove <NAME>` | Remove the application's routes; already selected generations remain alive until their requests finish. |
+
+Daemon operations accept the global `--state-dir <DIRECTORY>` option. See
+[daemon and deployment](#daemon-and-deployment) for lifecycle and transport details.
 
 Use `wr --help`, `wr --version`, or `wr <COMMAND> --help` to inspect the CLI.
 Arguments after `wr` go directly to the application.
@@ -43,8 +53,9 @@ Routes use Rocket's default ranks and collision rules. For routes without
 query constraints, fully static paths rank before partially dynamic paths,
 which rank before fully dynamic paths. This is a category ranking, not a
 per-segment specificity calculation. Overlapping routes with the same method
-and rank fail server startup, including `/a/<x>` and `/<y>/b`. Route conflicts
-are checked when running, not when generating or building the guest workspace.
+and rank fail foreground startup or deployment, including `/a/<x>` and `/<y>/b`.
+Route conflicts are checked when running or deploying, not when generating or
+building the guest workspace.
 There is no custom rank setting.
 
 Method matching participates in route selection: with `GET /users/me` and
@@ -100,10 +111,11 @@ A schema-valid manifest alone does not guarantee that setup or build succeeds.
 
 | Stage | Commands | Checks |
 | --- | --- | --- |
-| Manifest loading | setup, build, update, run | Parse YAML, resolve merges, validate against the embedded schema, deserialize, parse route URIs with Rocket, and check configured source files exist. |
+| Manifest loading | setup, build, update, run, deploy | Parse YAML, resolve merges, validate against the embedded schema, deserialize, parse route URIs with Rocket, and check configured source files exist. |
 | Discovery and generation | setup, build, update | Validate discovered source names and require sources; reject reserved or conflicting dependencies; merge ignore rules and validate editor settings. |
 | Workspace writing | setup without `--dry-run`, build, update | Refuse a handwritten root Cargo manifest before any writes; then create or update generated files. |
 | Server preparation | run | Read every configured component, validate imports and the guest contract, compile native code, let Rocket reject route collisions, then bind the listener. |
+| Deployment preparation | deploy | Read configured components, upload routes and bytes, then let the daemon validate and compile components and reject combined route collisions before publishing. |
 | Compilation and publication | build | Cargo checks Rust and dependencies; after successful compilation, require every expected artifact before copying components. |
 | Dependency update | update | Cargo resolves dependency versions allowed by the generated manifests and writes the application lockfile. |
 | Cleanup | clean | Require an existing directory and check root Cargo manifest ownership before any removals. |
@@ -229,7 +241,7 @@ resolver. It does not rewrite version requirements in `application.yaml`.
 See [Cargo's update command](https://doc.rust-lang.org/cargo/commands/cargo-update.html).
 
 Update invokes Cargo but does not compile handlers, publish components, or start
-the server. Existing components stay unchanged; rebuild and restart to use updated
+the server. Existing components stay unchanged; rebuild and redeploy (or restart foreground serving) to use updated
 dependencies. Review and retain the application lockfile in version control.
 This command updates application dependencies, not the `wr` installation.
 
@@ -354,3 +366,83 @@ Successful commands exit zero. Invalid arguments, manifest loading or validation
 failures, and failed operations exit nonzero. Manifest failures produce no
 readiness output. Diagnostics use parsing and validation library detail with
 basic operation context; no particular error-location format is guaranteed.
+
+## Daemon and deployment
+
+These commands currently require Unix (including macOS and Linux). The daemon is
+one background process with two listeners: an HTTP hosting listener and a private
+Unix control socket. It does not install a login service or restart itself after
+failure. `wr run` remains available for foreground, single-application serving.
+
+State-directory selection is `--state-dir`, then `WR_STATE_DIR`, then
+`$HOME/.wr/daemon`. Relative paths resolve against the invoking working directory.
+Use the same directory for all commands targeting a daemon. The directory is
+created with mode 0700; an existing directory with group/other permissions or a
+symlink is rejected. It contains `control.sock` (mode 0600), `daemon.lock`, and
+an append-only `daemon.log`. The full socket path must fit the platform's Unix
+socket path limit (less than 104 bytes on macOS). Use a shorter state directory
+if binding reports a path-length error. A different state directory selects a
+separate daemon, whose hosting address must also be available.
+
+`start` first queries the selected control socket. If a daemon responds, it
+succeeds and reports that instance's PID and actual hosting address without
+spawning a process or changing its applications. `--listen` only applies to new
+instances; stop the existing daemon first to change its address. A missing or
+refused socket connection proceeds with startup; other control errors fail the
+command. The process lock still prevents duplicate instances if starts race;
+a concurrent start whose daemon is not yet ready may need retrying.
+
+For a new instance, `start` waits up to 30 seconds for both listeners to bind. It prints the hosting
+address, control socket, and log location. Port zero selects an available hosting
+port. Startup failure prints no successful readiness and terminates/reaps the
+child; diagnostics are in the log. A process-held file lock prevents duplicate
+instances. A stale socket is removed only after acquiring that lock; a non-socket
+file at that path is rejected. The lock file itself remains after shutdown.
+The daemon uses a separate process group and has no terminal input.
+
+`status` queries the live control server, rather than trusting a PID file. An
+unreachable daemon is a command failure. `stop` requests graceful shutdown and
+waits up to 120 seconds for release of the process lock. New deployments and
+executions are rejected during shutdown. Already admitted executions and pending
+control work are drained; control reads/writes have 30-second deadlines. SIGINT
+and SIGTERM use the same shutdown path. Stopping an absent daemon fails.
+
+`deploy` loads the manifest and configured sources using the usual validation,
+then reads existing component files. It neither runs Cargo nor generates files.
+The control payload contains the manifest's application name, named method/path
+routes, and component bytes; source paths and build dependencies are not sent.
+The server independently validates names, methods, route syntax, component
+compatibility, and combined route collisions. Application and handler names use
+the manifest identifier constraints. At least one handler is required.
+
+Application names are deployment identities: deploying an existing name replaces
+its complete route/component set, and renaming it creates another application.
+All applications share one route namespace with the existing Rocket ranking and
+collision rules. Prepare/compile and route validation finish before atomic
+publication. Failure leaves every active application unchanged. Concurrent
+changes are serialized at publication and validated against the latest set.
+An acknowledged deployment is active for subsequent requests; a lost connection
+can leave its outcome unknown, so inspect/redeploy before assuming failure.
+
+Each request retains its selected routing generation until completion. Old
+components are released once no active registry or request references them.
+Removal returns after route publication, without waiting for prior requests.
+`remove` of an unknown name fails. The execution limits in [Run](#run) apply
+globally across applications; there is no per-application fairness guarantee.
+Deleting local build outputs does not affect deployed component bytes.
+
+The control transport uses one request and response per Unix connection. Each
+message is a four-byte big-endian byte length followed by UTF-8 JSON, capped at
+128 MiB including JSON encoding. The request's `command` is `deploy`, `remove`,
+`list`, `status`, or `stop`. Deploy includes `application: {name, handlers}`, where
+each handler contains `name`, `method`, `path`, and `component` (an array of byte
+values). Remove includes `name`. Responses use `result: ok`, `applications`
+(with `names`), `status` (with `pid`, `listen`, and `applications`), or `error`
+(with `message`). Four control requests may run concurrently; excess connections
+are closed. Client reads time out after 120 seconds; a timeout does not cancel a
+server-side deployment. The control socket is local administration, not a remote
+or multi-user authentication API.
+
+Deployments are held only in memory. Each new daemon process begins empty; redeploy
+the desired applications after a stop, crash, or restart. The state directory
+contains lifecycle files and logs, not persisted application configuration.

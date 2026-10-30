@@ -25,7 +25,10 @@ For an edit/build/run loop:
 make build
 ./target/debug/wr --help
 ./target/debug/wr build examples
-./target/debug/wr run examples --listen 127.0.0.1:9000
+./target/debug/wr daemon start --listen 127.0.0.1:9000
+./target/debug/wr deploy examples
+./target/debug/wr daemon status
+./target/debug/wr daemon stop
 make check
 ```
 
@@ -35,6 +38,11 @@ The installed `wr` changes only when you run `make install`. There is no
 ```sh
 cargo run --locked -- run examples --listen 127.0.0.1:9000
 ```
+
+`run` remains a foreground alternative. Use `--state-dir <DIRECTORY>` for an
+isolated development daemon, consistently on start, deployment, status, and stop.
+The directory must be private and its control socket path short enough for the
+platform's Unix socket limit. See the [daemon reference](docs/reference.md#daemon-and-deployment).
 
 Cargo options go before `--`; arguments after it go to `wr`. Use `cargo fmt`
 to apply formatting, or `cargo test --locked` to run just the tests. Other

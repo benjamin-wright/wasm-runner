@@ -22,7 +22,10 @@ handlers against the guest contract, preview or write a generated workspace,
 explicitly update dependencies, build components with locked dependencies by
 default, serve configured HTTP endpoints, and clean generated outputs.
 A reusable synchronous runtime and a CLI-independent HTTP server support
-embedding applications as well as the CLI.
+embedding applications as well as the CLI. On Unix, a background daemon hosts
+multiple applications on one HTTP listener, with a private control socket for
+atomic deployment, listing, removal, status, and shutdown. Deployments are
+in-memory and must be resubmitted after restarting the daemon.
 Source discovery is independent of route configuration, within the
 [manifest and discovery constraints](docs/reference.md#source-discovery).
 
@@ -51,12 +54,21 @@ Failure behavior, output paths, and preservation rules in the reference are
 part of these commitments even where the table summarizes them. Filesystem
 writes, removal, and publication are not promised to be transactional.
 
+### Daemon requirements
+
+| ID | Requirement | Observable acceptance condition and coverage |
+| --- | --- | --- |
+| R11 | Separate daemon lifecycle from application deployment. | `daemon start` returns after both listeners are bound, or succeeds by reporting an already running instance without changing its address or applications. `status` queries the live process, and `stop` waits for listener closure and execution draining. Failed startup leaves no new live daemon. `daemon_lifecycle_owns_both_listeners_and_restarts_empty` covers process lifecycle, repeated starts, failed binding, socket permissions, singleton ownership, and stale-socket recovery; the component-build workflow checks preservation of deployments on repeated start. Draining active executions remains a manual scenario. |
+| R12 | Host independently managed applications without interrupting unrelated routes. | A deployment contains identity, routes, and component bytes. Invalid components or conflicting routes leave all active applications unchanged. Replacement and removal affect future requests; requests already using a generation retain it. The component-build workflow covers two applications, failed and successful replacements, concurrent requests, removal, independence from source paths, and empty restart; replacing an executing generation remains a manual scenario. |
+
 ## Deliberate exclusions
 
 This increment does not provide SQL/KV host services or non-HTTP event triggers.
 The custom guest interface is not WASI HTTP. Prebuilt module declarations,
 automatic builds on run, automatic prerequisite installation, file watching,
-streaming, TLS configuration, rate limiting, custom schedulers, and unsupported
+streaming, TLS configuration, rate limiting, custom schedulers, persistent
+deployments, remote control administration, automatic startup at login/boot,
+Windows daemon support, per-application resource quotas, and unsupported
 dependency forms are outside the current contract. See the
 [reference](docs/reference.md) for exact input and host capability constraints.
 

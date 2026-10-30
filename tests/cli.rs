@@ -871,6 +871,8 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
     }
 
     serve_built_examples(&fixture.directory);
+    #[cfg(unix)]
+    deploy_built_examples(&fixture.directory);
 
     let destination = fixture.directory.join(".wr/components/greet.wasm");
     let previous = fs::read(&destination).unwrap();
@@ -1034,6 +1036,7 @@ fn serve_built_examples(directory: &std::path::Path) {
             let response = request("HEAD", "/hello/", "");
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
             assert!(response.split_once("\r\n\r\n").unwrap().1.is_empty());
+            assert!(response.to_ascii_lowercase().contains("content-length: 13\r\n"), "{response}");
             for (method, path, code) in [("GET", "/hello", 200), ("OPTIONS", "/hello/", 404), ("GET", "/users//orders", 404)] {
                 let response = request(method, path, "");
                 assert!(response.starts_with(&format!("HTTP/1.1 {code}")), "{response}");
@@ -1057,4 +1060,216 @@ fn serve_built_examples(directory: &std::path::Path) {
             |_| panic!("conflicting routes must fail before readiness")).await.unwrap_err();
         assert!(error.to_string().contains("collision"), "{error:#}");
     });
+}
+
+#[cfg(unix)]
+struct DaemonFixture {
+    directory: PathBuf,
+}
+
+#[cfg(unix)]
+impl DaemonFixture {
+    fn new() -> Self {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        // macOS limits Unix socket paths to 104 bytes; the host TMPDIR may be longer.
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!(
+                "wrd-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+        fs::create_dir(&directory).unwrap();
+        Self { directory }
+    }
+
+    fn call(&self, arguments: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_wr"))
+            .arg("--state-dir")
+            .arg(self.directory.join("d"))
+            .args(arguments)
+            .output()
+            .unwrap()
+    }
+
+    fn success(&self, arguments: &[&str]) -> String {
+        let output = self.call(arguments);
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}\nlog: {}",
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(self.directory.join("d/daemon.log")).unwrap_or_default()
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn start(&self) -> String {
+        let output = self.success(&["daemon", "start", "--listen", "127.0.0.1:0"]);
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("Listening on http://"))
+            .unwrap()
+            .to_owned()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DaemonFixture {
+    fn drop(&mut self) {
+        let _ = self.call(&["daemon", "stop"]);
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[cfg(unix)]
+fn http(address: &str, method: &str, path: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let daemon = DaemonFixture::new();
+    assert!(!daemon.call(&["daemon", "status"]).status.success());
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let output = daemon.call(&[
+        "daemon",
+        "start",
+        "--listen",
+        &occupied.local_addr().unwrap().to_string(),
+    ]);
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Listening"));
+    let address = daemon.start();
+    assert!(http(&address, "GET", "/").starts_with("HTTP/1.1 404"));
+    let state = daemon.directory.join("d");
+    assert_eq!(
+        fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(state.join("control.sock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let status = daemon.success(&["daemon", "status"]);
+    assert!(status.contains(&address));
+    let log = fs::read(state.join("daemon.log")).unwrap();
+    let repeated = daemon.success(&[
+        "daemon",
+        "start",
+        "--listen",
+        &occupied.local_addr().unwrap().to_string(),
+    ]);
+    assert!(repeated.contains("already running"));
+    assert!(repeated.contains(&address));
+    assert_eq!(daemon.success(&["daemon", "status"]), status);
+    assert_eq!(fs::read(state.join("daemon.log")).unwrap(), log);
+    daemon.success(&["daemon", "stop"]);
+    assert!(!state.join("control.sock").exists());
+    assert!(std::net::TcpStream::connect(&address).is_err());
+    assert!(!daemon.call(&["daemon", "status"]).status.success());
+    // A crash can leave a socket pathname; acquiring the process lock authorizes recovery.
+    let stale = std::os::unix::net::UnixListener::bind(state.join("control.sock")).unwrap();
+    drop(stale);
+    daemon.start();
+    assert!(daemon.success(&["apps", "list"]).is_empty());
+    daemon.success(&["daemon", "stop"]);
+}
+
+#[cfg(unix)]
+fn deploy_built_examples(directory: &std::path::Path) {
+    let daemon = DaemonFixture::new();
+    let address = daemon.start();
+    let first = ManifestFixture::new(
+        "name: first\nfunctions:\n  greet:\n    http: { method: GET, path: /first }\n",
+    );
+    let second = ManifestFixture::new(
+        "name: second\nfunctions:\n  greet:\n    http: { method: GET, path: /second }\n",
+    );
+    for application in [&first, &second] {
+        let components = application.directory.join(".wr/components");
+        fs::create_dir_all(&components).unwrap();
+        fs::copy(
+            directory.join(".wr/components/greet.wasm"),
+            components.join("greet.wasm"),
+        )
+        .unwrap();
+        daemon.success(&["deploy", application.directory.to_str().unwrap()]);
+    }
+    assert_eq!(daemon.start(), address);
+    assert_eq!(daemon.success(&["apps", "list"]), "first\nsecond\n");
+    for path in ["/first", "/second"] {
+        assert!(http(&address, "GET", path).ends_with("Hello, world!"));
+    }
+    // Invalid component replacement and route collisions leave both applications intact.
+    fs::write(
+        first.directory.join(".wr/components/greet.wasm"),
+        b"invalid",
+    )
+    .unwrap();
+    assert!(
+        !daemon
+            .call(&["deploy", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(http(&address, "GET", "/first").ends_with("Hello, world!"));
+    fs::copy(
+        directory.join(".wr/components/greet.wasm"),
+        first.directory.join(".wr/components/greet.wasm"),
+    )
+    .unwrap();
+    let original = fs::read_to_string(&first.path).unwrap();
+    fs::write(&first.path, original.replace("/first", "/second")).unwrap();
+    assert!(
+        !daemon
+            .call(&["deploy", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(http(&address, "GET", "/first").ends_with("Hello, world!"));
+    assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+
+    fs::write(&first.path, original.replace("/first", "/replacement")).unwrap();
+    std::thread::scope(|scope| {
+        let requests = scope.spawn(|| {
+            for _ in 0..40 {
+                assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+            }
+        });
+        daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+        requests.join().unwrap();
+    });
+    assert!(http(&address, "GET", "/first").starts_with("HTTP/1.1 404"));
+    assert!(http(&address, "GET", "/replacement").ends_with("Hello, world!"));
+    assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+    daemon.success(&["remove", "first"]);
+    assert!(http(&address, "GET", "/replacement").starts_with("HTTP/1.1 404"));
+    assert_eq!(daemon.success(&["apps", "list"]), "second\n");
+    assert!(!daemon.call(&["remove", "missing"]).status.success());
+    // Deployment owns bytes, not paths back to the submitted project.
+    fs::remove_file(second.directory.join(".wr/components/greet.wasm")).unwrap();
+    assert!(http(&address, "GET", "/second").ends_with("Hello, world!"));
+    daemon.success(&["daemon", "stop"]);
+    let address = daemon.start();
+    assert!(daemon.success(&["apps", "list"]).is_empty());
+    assert!(http(&address, "GET", "/second").starts_with("HTTP/1.1 404"));
+    daemon.success(&["daemon", "stop"]);
 }
