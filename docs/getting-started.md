@@ -37,7 +37,8 @@ because it lives beneath this checkout.
 The [examples directory](../examples) is an application directory:
 
 - [application.yaml](../examples/application.yaml) names the application `hello`
-  and configures greeting, JSON echo, and request-inspection routes.
+  and configures greeting, JSON echo, request-inspection, and deliberately
+  misbehaving routes.
 - [functions/greet.rs](../examples/functions/greet.rs) returns a greeting.
 - [functions/echo.rs](../examples/functions/echo.rs) parses and returns JSON.
 - [functions/inspect.rs](../examples/functions/inspect.rs) returns decoded path

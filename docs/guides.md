@@ -37,16 +37,17 @@ requirement to keep at least one configured function in the manifest.
 ## Configure dependencies
 
 Edit the application manifest, not generated Cargo manifests. To make
-`serde_json` available to every function in the checked-in example, move its
-declaration out of `functions.echo.dependencies` and add this top-level map:
+`serde_json` available to every function in the checked-in example, remove its
+declarations from both `functions.echo.dependencies` and
+`functions.inspect.dependencies`, then add this top-level map:
 
 ```yaml
 dependencies:
   serde_json: "1.0"
 ```
 
-Do not leave it at both levels: that is an error. To keep it local to `echo`,
-retain the example's function-level declaration instead:
+Do not leave it at both levels: that is an error. To keep dependencies local,
+retain the example's separate function-level declarations instead. For `echo`:
 
 ```yaml
     dependencies:
@@ -60,8 +61,9 @@ wr setup examples --dry-run
 wr build examples
 ```
 
-The preview should show the dependency in the generated workspace and inherited
-by each function for a shared declaration, or only in `echo` for a local one.
+The preview should show a shared dependency in the generated workspace and
+inherited by each function. A local dependency appears in its owning function's
+generated package.
 Setup checks declaration conflicts; Cargo resolves versions during build.
 Preserve the resulting application `Cargo.lock` in version control. See
 [dependency constraints](reference.md#dependencies), including the reserved
@@ -177,3 +179,9 @@ both 503 (overload) and 504 (admitted execution timeout). While loops are active
 Ctrl-C should drain admitted jobs before exiting. Also try cancelling a looping
 client: its execution slot remains occupied until the guest times out. These
 concurrency and shutdown checks are manual rather than timing-sensitive tests.
+
+To check request-body timeouts, use a client that pauses during a body upload to
+`/echo`, leaving bytes outstanding after the handler starts reading. Expect 408
+when the [body-reading allowance](reference.md#run) expires, then verify a normal
+`/hello` request still succeeds. Header handling uses Rocket's transport defaults
+and is separate from this timeout.

@@ -51,3 +51,9 @@ After changes to Rust code, dependencies, or build configuration, run `make chec
 before declaring completion. For documentation-only changes, check the relevant
 links and instructions. Report the checks actually run, their results, and any
 checks left unverified because of a blocker.
+
+When the host has enabled and approved the local development MCP tools, use
+them for their corresponding commands; `cargo_check` runs `make check`. See the
+[MCP workflow](CONTRIBUTING.md#local-development-mcp-server) for setup, the fixed
+command list, and the helper's verification command. Tool availability does not
+override host permissions; report execution restrictions as blockers.

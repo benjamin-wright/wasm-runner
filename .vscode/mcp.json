@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "wasm-runner-dev": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["${workspaceFolder}/scripts/dev_mcp.py"]
+    }
+  }
+}

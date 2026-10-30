@@ -49,6 +49,50 @@ Keep project-specific setup durable, idempotent, and reviewable through
 `make setup` and version-controlled configuration. Report environment blockers
 instead of requesting ad hoc installations or bypassing execution restrictions.
 
+### Local development MCP server
+
+[scripts/dev_mcp.py](scripts/dev_mcp.py) exposes fixed development commands over
+[MCP stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
+It needs Python 3.9 or newer on `PATH`, with no Python packages or Rust build
+required to start. Cargo, rustup, and make use the same prerequisites and
+`make setup` as ordinary development.
+
+The checked-in [VS Code configuration](.vscode/mcp.json) registers
+`wasm-runner-dev`. In a trusted checkout, use **MCP: List Servers** to start it,
+then **Chat: Manage Tool Approval** to pre-approve its tools if desired. These
+are [host-managed approvals](https://code.visualstudio.com/docs/agents/run/approvals);
+the server does not change approval or sandbox policies. Other MCP clients can
+launch `python3 /absolute/path/to/wasm-runner/scripts/dev_mcp.py` as a stdio server
+and configure tool approval in that client.
+
+| Tool | Operation |
+| --- | --- |
+| `cargo_fmt` | `cargo fmt --all` (writes formatting changes) |
+| `cargo_deps` | `cargo fetch --locked` (downloads locked dependencies; does not update versions) |
+| `cargo_build` | `make build` |
+| `cargo_clippy` | `cargo clippy --locked --workspace --all-targets -- -D warnings` |
+| `cargo_test` | `cargo test --locked --workspace` |
+| `cargo_check` | `make check` |
+
+Every tool takes an empty argument object and runs in the checkout containing
+the script, regardless of the client's working directory. Commands inherit
+the server's environment and permissions. Builds and tests execute repository
+and dependency code, so pre-approval means trusting that code as well as the
+wrapper. No arbitrary command, argument, or directory is accepted.
+
+Calls run one at a time and return the exit status and combined stdout/stderr
+after completion; a nonzero exit or launch failure is reported as a tool error.
+There is no streaming or cancellation support. Set the client's tool timeout
+long enough for a cold build. Dependency version updates remain a deliberate
+`make update-deps` operation.
+
+Verify the MCP transport, fixed commands, working directory, and error reporting
+without invoking Cargo:
+
+```sh
+python3 -B -m unittest discover -s tests -p 'test_dev_mcp.py'
+```
+
 ## Engineering principles
 
 Use descriptive names, sensible whitespace, and straightforward control flow.

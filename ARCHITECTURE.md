@@ -57,8 +57,8 @@ invoking Cargo. Native compilation belongs to runtime registration, not loading.
 YAML parsing and merge resolution use `yaml_serde`. The resolved document is
 validated by `jsonschema` against the embedded schema and deserialized into
 application types. Rocket parses route URIs; its ignition phase detects route
-collisions when starting the server. Source existence needs filesystem checks. Library diagnostics
-receive basic operation context through `anyhow`; custom source-location
+collisions when starting the server. Source existence needs filesystem checks.
+Library diagnostics receive basic operation context through `anyhow`; custom source-location
 tracking is not part of the design. See [validation stages](docs/reference.md#validation-stages).
 
 ## Guest workspace boundary

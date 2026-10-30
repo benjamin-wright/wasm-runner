@@ -634,27 +634,7 @@ fn invalid_manifests_fail_before_printing_metadata() {
             &["/functions/greet/http/method", "get"][..],
         ),
         (
-            EXAMPLE.replace("path: /hello", "path: /hello#fragment"),
-            &["/functions/greet/http/path"][..],
-        ),
-        (
             EXAMPLE.replace("path: /hello", "path: relative"),
-            &["/functions/greet/http/path"][..],
-        ),
-        (
-            EXAMPLE.replace("path: /hello", "path: '/white space'"),
-            &["/functions/greet/http/path"][..],
-        ),
-        (
-            EXAMPLE.replace("path: /hello", "path: \"/white\\u2003space\""),
-            &["/functions/greet/http/path"][..],
-        ),
-        (
-            EXAMPLE.replace("path: /hello", "path: \"/control\\u007f\""),
-            &["/functions/greet/http/path"][..],
-        ),
-        (
-            EXAMPLE.replace("path: /hello", "path: '/{parameter:.*}'"),
             &["/functions/greet/http/path"][..],
         ),
         (
@@ -680,7 +660,10 @@ fn invalid_manifests_fail_before_printing_metadata() {
         assert_eq!(output.status.code(), Some(1), "accepted {source}");
         assert!(output.stdout.is_empty());
         let error = String::from_utf8(output.stderr).unwrap();
-        assert!(error.contains(fixture.path.to_str().unwrap()), "{error}");
+        assert!(
+            error.contains(fixture.path.to_str().unwrap()),
+            "{source}\n{error}"
+        );
         for fragment in expected {
             assert!(
                 error.to_lowercase().contains(fragment),

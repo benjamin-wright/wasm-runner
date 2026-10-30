@@ -35,8 +35,8 @@ constraints and supported methods. Unknown fields are rejected. `http.path`
 is a [Rocket route URI](https://api.rocket.rs/v0.5/rocket/struct.Route.html),
 parsed by Rocket itself. Use `/users/<user_id>/orders` for a single-segment
 capture or `/files/<path..>` for a trailing capture. Query constraints and
-percent-encoded literals follow Rocket's rules. The old `{name}` syntax is
-not supported.
+percent-encoded literals follow Rocket's rules. Use `<name>` for captures;
+the old `{name}` form is not capture syntax.
 
 Routes use Rocket's default ranks and collision rules. For routes without
 query constraints, fully static paths rank before partially dynamic paths,
@@ -106,7 +106,8 @@ A schema-valid manifest alone does not guarantee that setup or build succeeds.
 | Compilation and publication | build | Cargo checks Rust and dependencies; after successful compilation, require every expected artifact before copying components. |
 | Cleanup | clean | Require an existing directory and check root Cargo manifest ownership before any removals. |
 
-Run does not perform discovery, workspace generation, or compilation.
+Run does not discover sources, generate a workspace, or compile guest Rust code.
+It does compile the existing components to native code during runtime registration.
 Dry-run performs discovery and generation but does not perform the writer's
 root-manifest ownership check. Neither setup mode reads function source contents.
 
@@ -287,7 +288,9 @@ be 200–599 and header names/values must be HTTP-valid. Hop-by-hop headers,
 headers named by `Connection`, and guest `Content-Length` are removed; transport
 framing is computed by the server. Bodies are suppressed where HTTP requires
 it, including HEAD and statuses 204, 205, and 304. Execution diagnostics go to
-host stderr; generated error responses have empty bodies.
+host stderr. Errors produced by the component dispatch layer have empty bodies;
+Rocket's own responses, such as an unmatched route's 404, use its default error
+responders and may include a body.
 
 ### Runtime and WASI policy
 
@@ -309,8 +312,8 @@ reads report time since invocation; timer subscriptions trap because native
 WASI waits cannot be interrupted by guest epochs. Filesystem, random, socket,
 wall-clock, and custom host interfaces are not supported in this increment.
 Unsupported imports and incompatible guest interfaces fail registration.
-The guest contract is `local:http/handler@0.2.0`; components
-built with the earlier request shape must be rebuilt.
+The [guest contract](../wit/README.md#execution-and-compatibility) defines interface
+versioning and rebuild requirements.
 
 Epoch interruption cannot forcibly terminate arbitrary host code or undo
 external effects. Any future host I/O must honor the remaining execution
