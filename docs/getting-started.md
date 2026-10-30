@@ -20,7 +20,7 @@ wr --help
 pinned Rust toolchain, Clippy, rustfmt, and `wasm32-wasip2` target. `make install`
 builds a release binary using the repository's [Cargo.lock](../Cargo.lock) and
 installs `wr` into Cargo's binary directory (normally `~/.cargo/bin`). Ensure
-that directory is on your `PATH`. Help should list `setup`, `build`, `clean`,
+that directory is on your `PATH`. Help should list `setup`, `build`, `update`, `clean`,
 and `run`.
 
 Repeat `make install` to refresh the installed command after changes. Use
@@ -81,6 +81,12 @@ generates a root Cargo manifest inside the application, wrappers under `.wr`,
 and artifacts under `target`. It merges ignore rules and editor settings.
 A handwritten application-root Cargo manifest is protected from overwrite.
 See [generated files](reference.md#generated-files) for ownership details.
+
+Builds use the application's locked dependency versions by default. The example
+includes `Cargo.lock`; for a new application, run `wr update <DIRECTORY>` before
+its first build to create the lockfile. Use update again when deliberately
+refreshing dependency versions or adding/removing functions, then review the
+lockfile changes and rebuild. See [dependency updates](reference.md#update).
 
 ## Serve the application
 

@@ -34,7 +34,27 @@ pub(crate) fn compile_workspace(directory: &Path, options: &BuildOptions) -> Res
         "running Cargo; install the Rust toolchain and wasm32-wasip2 target (see README)",
     )?;
     if !status.success() {
+        if options.locked {
+            bail!(
+                "Cargo build failed ({status}); components were not published. If Cargo reports a missing or outdated lockfile, run `wr update {}` or explicitly build with --unlocked",
+                directory.display()
+            );
+        }
         bail!("Cargo build failed ({status}); components were not published");
+    }
+    Ok(())
+}
+
+pub(crate) fn update_dependencies(directory: &Path) -> Result<()> {
+    let status = Command::new("cargo")
+        .current_dir(directory)
+        .arg("update")
+        .arg("--manifest-path")
+        .arg(directory.join("Cargo.toml"))
+        .status()
+        .context("running Cargo to update application dependencies")?;
+    if !status.success() {
+        bail!("Cargo update failed ({status}); components were not built or published");
     }
     Ok(())
 }

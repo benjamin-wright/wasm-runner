@@ -19,9 +19,9 @@ pub(super) struct Build {
     #[arg(long)]
     release: bool,
 
-    /// Require an up-to-date Cargo.lock without changing it
+    /// Allow Cargo to create or change Cargo.lock (builds are locked by default)
     #[arg(long)]
-    locked: bool,
+    unlocked: bool,
 }
 
 impl Build {
@@ -34,7 +34,7 @@ impl Build {
 
         let options = build::BuildOptions {
             release: self.release,
-            locked: self.locked,
+            locked: !self.unlocked,
         };
         build::compile_workspace(&directory, &options)?;
         let published = build::publish_outputs(&directory, &functions, &options)?;

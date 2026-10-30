@@ -9,13 +9,14 @@ the authoritative field and guest-interface definitions.
 ## Commands
 
 All commands require an application directory, supplied as a relative or absolute
-path. Setup, build, and run read `application.yaml` inside it; alternate manifest
+path. Setup, build, update, and run read `application.yaml` inside it; alternate manifest
 filenames are not supported. Clean does not load a manifest.
 
 | Invocation | Behavior and options |
 | --- | --- |
 | `wr setup <DIRECTORY> [--dry-run]` | Generate the guest workspace, or preview paths and contents without writing. |
-| `wr build <DIRECTORY> [--release] [--locked]` | Refresh the workspace and compile components. Debug is the default; `--release` selects optimization; `--locked` requires an up-to-date guest lockfile. |
+| `wr build <DIRECTORY> [--release] [--unlocked]` | Refresh the workspace and compile components using an up-to-date guest lockfile. Debug is the default; `--release` selects optimization; `--unlocked` explicitly permits lockfile changes. |
+| `wr update <DIRECTORY>` | Refresh the workspace and create or update the guest lockfile to the newest compatible dependency versions, without building components. |
 | `wr clean <DIRECTORY>` | Remove generated workspace files and build outputs. |
 | `wr run <DIRECTORY> [--listen <IP:PORT>]` | Serve previously built handlers. The listener defaults to `127.0.0.1:8080`. |
 
@@ -68,7 +69,7 @@ Cargo has its own configuration and environment, described under [Build](#build)
 
 ## Source discovery
 
-Setup and build discover every direct `functions/*.rs` file, including sources
+Setup, build, and update discover every direct `functions/*.rs` file, including sources
 without a manifest entry. Discovery is non-recursive, ignores directories and
 other extensions, validates filenames using the function identifier rules, and
 sorts names. At least one source function is required.
@@ -99,11 +100,12 @@ A schema-valid manifest alone does not guarantee that setup or build succeeds.
 
 | Stage | Commands | Checks |
 | --- | --- | --- |
-| Manifest loading | setup, build, run | Parse YAML, resolve merges, validate against the embedded schema, deserialize, parse route URIs with Rocket, and check configured source files exist. |
-| Discovery and generation | setup, build | Validate discovered source names and require sources; reject reserved or conflicting dependencies; merge ignore rules and validate editor settings. |
-| Workspace writing | setup without `--dry-run`, build | Refuse a handwritten root Cargo manifest before any writes; then create or update generated files. |
+| Manifest loading | setup, build, update, run | Parse YAML, resolve merges, validate against the embedded schema, deserialize, parse route URIs with Rocket, and check configured source files exist. |
+| Discovery and generation | setup, build, update | Validate discovered source names and require sources; reject reserved or conflicting dependencies; merge ignore rules and validate editor settings. |
+| Workspace writing | setup without `--dry-run`, build, update | Refuse a handwritten root Cargo manifest before any writes; then create or update generated files. |
 | Server preparation | run | Read every configured component, validate imports and the guest contract, compile native code, let Rocket reject route collisions, then bind the listener. |
 | Compilation and publication | build | Cargo checks Rust and dependencies; after successful compilation, require every expected artifact before copying components. |
+| Dependency update | update | Cargo resolves dependency versions allowed by the generated manifests and writes the application lockfile. |
 | Cleanup | clean | Require an existing directory and check root Cargo manifest ownership before any removals. |
 
 Run does not discover sources, generate a workspace, or compile guest Rust code.
@@ -136,7 +138,7 @@ All paths below are relative to the application directory.
 | `.wr/wit/world.wit` | Copy of the embedded guest contract. |
 | `.gitignore` | Existing contents preserved; required literal entries appended if missing. |
 | `.vscode/settings.json` | Existing settings merged with the source include path. |
-| `Cargo.lock` | Managed by Cargo during builds, not by setup; keep it in version control. |
+| `Cargo.lock` | Managed by Cargo during update or explicitly unlocked builds, not by setup; keep it in version control. |
 | `target/` | Application-local Cargo build artifacts. |
 | `.wr/components/<name>.wasm` | Components published after successful compilation. |
 
@@ -186,10 +188,17 @@ optional. It invokes Cargo once for all discovered function libraries, targeting
 overrides Cargo's target-directory configuration. Other Cargo configuration and
 environment remain in effect; `wr` does not clear the environment.
 
-Debug builds are the default. `--release` selects optimized builds. Cargo creates
-or updates the application's `Cargo.lock` normally; `--locked` requires it to
-exist and be up to date without changes. Guest dependencies, including managed
-`wit-bindgen`, are separate from the CLI's lockfile. Building requires Cargo and
+Debug builds are the default. `--release` selects optimized builds. Builds pass
+`--locked` to Cargo by default: the application's `Cargo.lock` must exist and be
+up to date, and a missing lockfile or resolution requiring changes fails the build.
+Run `wr update <DIRECTORY>` before the first build and when deliberately refreshing
+dependencies or changing workspace membership. Source-only edits do not need an
+update. `wr build --unlocked` opts out and lets Cargo create or adjust the lockfile
+as needed; it does not force all already-locked versions to be upgraded. The old
+`wr build --locked` flag is replaced by this locked default.
+
+Guest dependencies, including managed `wit-bindgen`, are separate from the
+CLI's lockfile. Building requires Cargo and
 the WASM target; `wr` never installs them. See [prerequisites](getting-started.md#prerequisites-and-installation).
 
 Cargo diagnostics are inherited directly. A nonzero Cargo status fails the
@@ -209,6 +218,25 @@ These are components exporting the [custom HTTP guest interface](../wit/README.m
 not WASI HTTP. The target may introduce WASI imports. Build does not execute
 components, serve HTTP, provide host capability policy or SQL/KV support, or
 implement event handlers.
+
+## Update
+
+`wr update <DIRECTORY>` validates inputs and refreshes the generated workspace
+using the same ownership checks as build, then runs `cargo update` against that
+workspace. It creates a missing application `Cargo.lock`, or updates dependencies
+to the newest versions compatible with the manifest requirements and Cargo's
+resolver. It does not rewrite version requirements in `application.yaml`.
+See [Cargo's update command](https://doc.rust-lang.org/cargo/commands/cargo-update.html).
+
+Update invokes Cargo but does not compile handlers, publish components, or start
+the server. Existing components stay unchanged; rebuild and restart to use updated
+dependencies. Review and retain the application lockfile in version control.
+This command updates application dependencies, not the `wr` installation.
+
+Cargo configuration and environment remain in effect. Cargo diagnostics pass
+through, and a failed update exits nonzero without a success message. Generated
+workspace files may already have changed; the operation is not transactional.
+Success reports `Updated dependencies in <PATH>`, naming the application lockfile.
 
 ## Clean
 

@@ -108,6 +108,7 @@ fn invalid_invocations_are_rejected() {
         vec!["run"],
         vec!["setup"],
         vec!["build"],
+        vec!["update"],
         vec!["clean"],
         vec!["run", "application.yaml", "--listen"],
         vec!["run", "application.yaml", "--listen", "localhost:9000"],
@@ -722,7 +723,7 @@ fn commands_require_a_directory_and_report_missing_function_sources() {
 
     let source = fixture.directory.join("functions/greet.rs");
     fs::remove_file(&source).unwrap();
-    for command in ["run", "setup", "build"] {
+    for command in ["run", "setup", "build", "update"] {
         let output = wr(&[command, fixture.directory.to_str().unwrap()]);
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
@@ -791,18 +792,31 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
     )
     .unwrap();
 
-    let output = fixture.build(&["--locked"]);
+    let output = fixture.build(&[]);
     assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("wr update"));
     assert!(!fixture.directory.join("Cargo.lock").exists());
     assert!(!fixture.directory.join(".wr/components").exists());
 
+    let output = wr(&["update", fixture.directory.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lockfile = fs::read(fixture.directory.join("Cargo.lock")).unwrap();
+
     let mut debug_artifact_time = None;
-    for arguments in [vec![], vec!["--locked"], vec!["--release", "--locked"]] {
+    for arguments in [vec![], vec![], vec!["--release"]] {
         let output = fixture.build(&arguments);
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read(fixture.directory.join("Cargo.lock")).unwrap(),
+            lockfile
         );
         let profile = if arguments.contains(&"--release") {
             "release"
@@ -858,18 +872,103 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
 
     serve_built_examples(&fixture.directory);
 
-    let lockfile = fs::read(fixture.directory.join("Cargo.lock")).unwrap();
     let destination = fixture.directory.join(".wr/components/greet.wasm");
     let previous = fs::read(&destination).unwrap();
+    fs::write(fixture.directory.join("functions/added.rs"), GREET_FUNCTION).unwrap();
+    let output = fixture.build(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!fixture.directory.join(".wr/components/added.wasm").exists());
+    assert_eq!(fs::read(&destination).unwrap(), previous);
+    assert_eq!(
+        fs::read(fixture.directory.join("Cargo.lock")).unwrap(),
+        lockfile
+    );
+
+    let output = fixture.build(&["--unlocked"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fixture
+            .directory
+            .join(".wr/components/added.wasm")
+            .is_file()
+    );
+    let updated_lockfile = fs::read(fixture.directory.join("Cargo.lock")).unwrap();
+    assert_ne!(updated_lockfile, lockfile);
+    let previous = fs::read(&destination).unwrap();
     fs::write(fixture.directory.join("functions/greet.rs"), "invalid Rust").unwrap();
-    let output = fixture.build(&["--locked"]);
+    let output = fixture.build(&[]);
     assert_eq!(output.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("Built "));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Cargo build failed"));
     assert_eq!(fs::read(destination).unwrap(), previous);
     assert_eq!(
         fs::read(fixture.directory.join("Cargo.lock")).unwrap(),
-        lockfile
+        updated_lockfile
+    );
+}
+
+#[test]
+fn update_refreshes_dependencies_without_building() {
+    let source = format!("{EXAMPLE}\ndependencies:\n  itoa: '=1.0.17'\n");
+    let fixture = ManifestFixture::new(&source);
+    let locked_version = || {
+        let lockfile = fs::read_to_string(fixture.directory.join("Cargo.lock")).unwrap();
+        let lockfile: toml::Value = toml::from_str(&lockfile).unwrap();
+        lockfile["package"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"].as_str() == Some("itoa"))
+            .unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let output = wr(&["update", fixture.directory.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(locked_version(), "1.0.17");
+    assert!(!fixture.directory.join("target").exists());
+    assert!(!fixture.directory.join(".wr/components").exists());
+
+    let components = fixture.directory.join(".wr/components");
+    fs::create_dir(&components).unwrap();
+    let published = components.join("greet.wasm");
+    fs::write(&published, b"previously published component").unwrap();
+    fs::write(
+        &fixture.path,
+        source.replace("=1.0.17", ">=1.0.17, <=1.0.18"),
+    )
+    .unwrap();
+    let output = wr(&["update", fixture.directory.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(locked_version(), "1.0.18");
+    assert!(!fixture.directory.join("target").exists());
+    assert_eq!(
+        fs::read(&published).unwrap(),
+        b"previously published component"
+    );
+
+    fs::write(&fixture.path, source.replace("=1.0.17", "invalid version")).unwrap();
+    let output = wr(&["update", fixture.directory.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Cargo update failed"));
+    assert_eq!(
+        fs::read(&published).unwrap(),
+        b"previously published component"
     );
 }
 

@@ -23,6 +23,7 @@ function its name. To configure a route, add this entry under the existing
 Run:
 
 ```sh
+wr update examples
 wr build examples
 wr run examples
 ```
@@ -54,17 +55,18 @@ retain the example's separate function-level declarations instead. For `echo`:
       serde_json: {version: "1.0", default-features: true}
 ```
 
-Preview and build after editing:
+Preview, update the lockfile, and build after editing:
 
 ```sh
 wr setup examples --dry-run
+wr update examples
 wr build examples
 ```
 
 The preview should show a shared dependency in the generated workspace and
 inherited by each function. A local dependency appears in its owning function's
 generated package.
-Setup checks declaration conflicts; Cargo resolves versions during build.
+Setup checks declaration conflicts; update asks Cargo to resolve dependency versions.
 Preserve the resulting application `Cargo.lock` in version control. See
 [dependency constraints](reference.md#dependencies), including the reserved
 `wit-bindgen` dependency.
@@ -110,18 +112,31 @@ able to inspect the generated `Request` and `Response` types in a handler.
 
 ## Make a locked or release build
 
-First build normally to create or update the application's lockfile, then use
-the desired options:
+Builds are locked by default. Create the application's lockfile with `wr update`
+before its first build, or update it deliberately after changing dependencies or
+adding/removing functions. For an application with an up-to-date lockfile, use:
 
 ```sh
 wr build examples
-wr build examples --locked
-wr build examples --release --locked
+wr build examples --release
 ```
 
-Keep `examples/Cargo.lock` in version control. `--locked` fails if dependency
-resolution would require changing it. After changing dependencies deliberately,
-build without `--locked`, review the lockfile changes, and use `--locked` again.
+Keep `examples/Cargo.lock` in version control. A normal build fails if the lockfile
+is missing or dependency resolution would require changing it. Source-only edits
+do not need a dependency update.
+
+To pull newer versions allowed by your manifest requirements:
+
+```sh
+wr update examples
+wr build examples
+```
+
+Review the lockfile changes after update. Update does not build or change published
+components, so rebuild and restart the server to use the new dependencies.
+For an explicit one-off build that allows necessary lockfile changes, use
+`wr build examples --unlocked`. Unlike update, this does not force upgrades of
+dependencies already satisfied by the lockfile.
 
 Both profiles publish to the same `.wr/components/<name>.wasm` paths, so the
 last successful build supplies those files. Cargo failure preserves previously

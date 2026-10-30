@@ -43,7 +43,8 @@ Cargo operations can be invoked directly as needed.
 Dependency updates are separate from setup: run `make update-deps` only when
 intentionally refreshing versions, then review the lockfile changes before
 committing them. Build, install, and check use `--locked` and do not update the
-runner lockfile. Guest builds have their own [lockfile behavior](docs/reference.md#build).
+runner lockfile. Guest builds are also locked by default; `wr update <DIRECTORY>`
+refreshes application dependencies. See [guest lockfile behavior](docs/reference.md#build).
 
 Keep project-specific setup durable, idempotent, and reviewable through
 `make setup` and version-controlled configuration. Report environment blockers
@@ -147,6 +148,7 @@ contracts; prose explains their use and limitations rather than reproducing them
 | [Contributing](CONTRIBUTING.md) | Development, engineering, verification, and documentation practices |
 | [Makefile](Makefile) and [toolchain configuration](rust-toolchain.toml) | Executable lifecycle commands and toolchain selection |
 | [Agent instructions](AGENTS.md) and [skills](.agents/skills) | Agent operating rules and conditional procedures that use these shared documents |
+| [Shareable application skill](skills/wasm-runner/SKILL.md) | Portable application-author workflow summaries; exact behavior remains in the reference, schema, and WIT |
 
 ### Maintain documentation with each change
 
@@ -159,7 +161,7 @@ contracts; prose explains their use and limitations rather than reproducing them
 - A schema or WIT change updates its authoritative definition and adjacent
   explanation and examples.
 - A capability-status change updates the short entry-point summaries, including
-  package metadata when it affects CLI help.
+  the shareable application skill and package metadata when it affects CLI help.
 
 During review, check that detailed facts have clear owners, summaries agree,
 links and referenced assets resolve, and a reader can finish the documented

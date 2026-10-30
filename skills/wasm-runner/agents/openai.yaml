@@ -1,0 +1,4 @@
+interface:
+  display_name: "WASM Runner"
+  short_description: "Set up, build, and serve wasm-runner applications"
+  default_prompt: "Use $wasm-runner to create and verify a Rust HTTP application with the wr CLI."

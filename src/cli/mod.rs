@@ -2,6 +2,7 @@ mod build;
 mod clean;
 mod run;
 mod setup;
+mod update;
 
 use std::path::{Path, PathBuf, absolute};
 
@@ -19,6 +20,7 @@ struct Cli {
 enum Command {
     Setup(setup::Setup),
     Build(build::Build),
+    Update(update::Update),
     Clean(clean::Clean),
     Run(run::Run),
 }
@@ -27,6 +29,7 @@ pub fn execute() -> Result<()> {
     match Cli::parse().command {
         Command::Setup(command) => command.execute(),
         Command::Build(command) => command.execute(),
+        Command::Update(command) => command.execute(),
         Command::Clean(command) => command.execute(),
         Command::Run(command) => command.execute(),
     }

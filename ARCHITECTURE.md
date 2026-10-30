@@ -17,10 +17,10 @@ handlers compile in separate generated guest workspaces.
 | --- | --- |
 | [main](src/main.rs) | Report errors and return the process exit status |
 | [CLI parser](src/cli/mod.rs) | Parse top-level arguments and dispatch commands |
-| [setup](src/cli/setup.rs), [build](src/cli/build.rs), [clean](src/cli/clean.rs), [run](src/cli/run.rs) | Keep each command's arguments, orchestration, and presentation together |
+| [setup](src/cli/setup.rs), [build](src/cli/build.rs), [update](src/cli/update.rs), [clean](src/cli/clean.rs), [run](src/cli/run.rs) | Keep each command's arguments, orchestration, and presentation together |
 | [Manifest service](src/services/manifest.rs) | Own application/dependency types, load and validate YAML, parse route URIs with Rocket, check configured sources, and resolve component paths |
 | [Workspace service](src/services/workspace.rs) | Discover sources, select dependencies, render workspace files, merge user configuration, write generated files, and clean owned outputs |
-| [Build service](src/services/build.rs) | Invoke Cargo and publish components from deterministic artifact paths |
+| [Build service](src/services/build.rs) | Invoke Cargo for locked builds or explicit dependency updates and publish components from deterministic artifact paths |
 | [Component loader](src/services/loader.rs) | Read configured component files with function/path diagnostics |
 | [Runtime](src/services/runtime.rs) | Compile and validate components, own the engine/ticker, and invoke fresh isolated instances |
 | [HTTP server](src/services/server.rs) | Register Rocket routes, translate HTTP, bound execution admission, and drain shutdown |
@@ -45,11 +45,12 @@ flowchart TD
     Generate --> Write[Check ownership and write changed files]
     Write --> Setup[Setup: report workspace]
     Write --> Cargo[Build: invoke Cargo]
+    Write --> Update[Update: resolve dependencies and write lockfile]
     Cargo --> Publish[Check all artifacts, then copy components]
     CLI --> Clean[Clean: check ownership and remove generated outputs]
 ```
 
-Setup, build, and run load the manifest once within their command workflows.
+Setup, build, update, and run load the manifest once within their command workflows.
 Clean only needs the directory, allowing recovery from invalid or missing
 application inputs. Run loads existing components without generating files or
 invoking Cargo. Native compilation belongs to runtime registration, not loading.
@@ -104,6 +105,11 @@ and compiler diagnostics. The build service supplies the WASM target, profile,
 and application-local target directory. It computes artifact paths from explicit
 library names instead of parsing Cargo JSON output, reducing orchestration to
 the information it needs.
+
+Builds pass `--locked` to Cargo unless the user explicitly selects `--unlocked`.
+Update shares workspace generation and ownership checks, then delegates to
+`cargo update` without compilation or publication. This keeps dependency upgrades
+explicit and uses Cargo's resolver instead of maintaining separate lockfile logic.
 
 Only successful compilation followed by existence checks for all expected
 artifacts allows publication to begin. This prevents failed Cargo builds from
