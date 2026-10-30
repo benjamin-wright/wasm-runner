@@ -1,18 +1,18 @@
 # WASM Runner
 
-WASM Runner is a Rust CLI for preparing and building WebAssembly function
+WASM Runner is a Rust CLI for building and serving WebAssembly HTTP function
 components from an application manifest. The command is `wr`. It is for
 application authors working with Rust handlers and HTTP route configuration.
 
 `wr setup` prepares a guest Cargo workspace, `wr build` compiles components,
-and `wr clean` removes generated files and build outputs. HTTP serving is
-planned; currently, `wr run` validates the application, prints metadata, and
-exits. It does not execute components or start an HTTP server.
+and `wr clean` removes generated files and build outputs. After building,
+`wr run` serves configured handlers on `127.0.0.1:8080` by default. The library
+also exposes a reusable component runtime and HTTP server.
 
 ## Get started
 
 Follow [Build your first application](docs/getting-started.md) to install the
-CLI, build the checked-in example, and inspect its metadata. For build errors
+CLI, build the checked-in example, and call its HTTP endpoints. For build errors
 involving Cargo or the WASM target, start with the
 [prerequisites and installation](docs/getting-started.md#prerequisites-and-installation).
 
@@ -31,5 +31,4 @@ involving Cargo or the WASM target, start with the
 The [example application](examples/application.yaml),
 [manifest schema](application.schema.json), and [WIT world](wit/world.wit) supply
 concrete examples and exact interface definitions. The guest interface is custom,
-not WASI HTTP. Component execution, host capability policy, SQL/KV support,
-and event handling are not implemented.
+not WASI HTTP. SQL/KV support and non-HTTP event handling are not implemented.

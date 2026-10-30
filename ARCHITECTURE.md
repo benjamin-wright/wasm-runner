@@ -7,17 +7,23 @@ live in [Contributing](CONTRIBUTING.md).
 
 ## Structure
 
-The runner is a single Rust package. Application handlers compile in separate
-generated guest workspaces.
+The runner is a single Rust package with a library and a thin CLI binary.
+The library owns the CLI modules and a single service module tree; the binary
+calls its CLI entry point. Runtime and server modules are publicly re-exported
+for embedding, while the other service modules remain internal. Application
+handlers compile in separate generated guest workspaces.
 
 | Component | Responsibility |
 | --- | --- |
 | [main](src/main.rs) | Report errors and return the process exit status |
 | [CLI parser](src/cli/mod.rs) | Parse top-level arguments and dispatch commands |
 | [setup](src/cli/setup.rs), [build](src/cli/build.rs), [clean](src/cli/clean.rs), [run](src/cli/run.rs) | Keep each command's arguments, orchestration, and presentation together |
-| [Manifest service](src/services/manifest.rs) | Own application/dependency types, load and validate YAML, check cross-function constraints and configured sources, and resolve component paths |
+| [Manifest service](src/services/manifest.rs) | Own application/dependency types, load and validate YAML, parse route URIs with Rocket, check configured sources, and resolve component paths |
 | [Workspace service](src/services/workspace.rs) | Discover sources, select dependencies, render workspace files, merge user configuration, write generated files, and clean owned outputs |
 | [Build service](src/services/build.rs) | Invoke Cargo and publish components from deterministic artifact paths |
+| [Component loader](src/services/loader.rs) | Read configured component files with function/path diagnostics |
+| [Runtime](src/services/runtime.rs) | Compile and validate components, own the engine/ticker, and invoke fresh isolated instances |
+| [HTTP server](src/services/server.rs) | Register Rocket routes, translate HTTP, bound execution admission, and drain shutdown |
 
 Services are independent of CLI argument types and presentation. They return
 results for commands to present; Cargo's diagnostics pass through directly.
@@ -29,7 +35,10 @@ or trigger frameworks.
 ```mermaid
 flowchart TD
     CLI[CLI command] --> Load[Load and validate manifest]
-    Load --> Run[Run: print metadata]
+    Load --> Read[Run: read component files]
+    Read --> Prepare[Validate routes and register components]
+    Prepare --> Bind[Bind listener and announce readiness]
+    Bind --> Serve[Dispatch HTTP requests to isolated executions]
     Load --> Discover[Discover source functions]
     Discover --> Generate[Generate files in memory]
     Generate --> Preview[Setup dry-run: print preview]
@@ -42,13 +51,13 @@ flowchart TD
 
 Setup, build, and run load the manifest once within their command workflows.
 Clean only needs the directory, allowing recovery from invalid or missing
-application inputs. Run ends at metadata; component paths and routes do not
-imply execution or a bound listener.
+application inputs. Run loads existing components without generating files or
+invoking Cargo. Native compilation belongs to runtime registration, not loading.
 
 YAML parsing and merge resolution use `yaml_serde`. The resolved document is
 validated by `jsonschema` against the embedded schema and deserialized into
-application types. Route uniqueness and source existence need additional checks
-because they span functions or depend on the filesystem. Library diagnostics
+application types. Rocket parses route URIs; its ignition phase detects route
+collisions when starting the server. Source existence needs filesystem checks. Library diagnostics
 receive basic operation context through `anyhow`; custom source-location
 tracking is not part of the design. See [validation stages](docs/reference.md#validation-stages).
 
@@ -101,13 +110,43 @@ artifacts allows publication to begin. This prevents failed Cargo builds from
 publishing stale outputs as new successes. Copies are not transactional: a later
 copy failure can leave mixed published outputs. See [Build](docs/reference.md#build).
 
-## Runtime boundary
+## Runtime and transport boundaries
 
-There is no component runtime, HTTP transport, or host capability policy yet.
-The current guest world declares no host imports, but `wasm32-wasip2` can
-introduce WASI imports that a future host must satisfy. The custom guest
-interface is not WASI HTTP.
+The runtime owns a Wasmtime engine with epoch interruption and a dedicated
+ticker thread. It retains typed pre-instantiated component metadata after
+registration resolves imports and checks exports. Every call creates a new
+store, resource table, WASI context, and guest instance. Registration takes
+mutable access; execution shares immutable prepared code without a shared
+guest instance or execution mutex. Opaque IDs carry runtime ownership identity.
+Dropping the runtime signals and joins its ticker thread.
 
-Future execution and trigger design belongs to the
-[open product decisions](SPEC.md#open-decisions). Add concrete boundaries when
-those features are agreed; do not scaffold unused runtime or trigger modules.
+Deadlines are configured to trap, not yield. The allowance starts inside the
+synchronous invocation and includes instantiation. An extra epoch tick prevents
+calls arriving just before a tick from expiring early; the elapsed-time check
+also catches calls that return after their allowance. Epochs cannot interrupt
+arbitrary host functions. A registration allowlist and capability-free WASI
+contexts limit the current host surface to the
+[documented policy](docs/reference.md#runtime-and-wasi-policy).
+
+The server registers each configured URI directly as a Rocket route with its
+default rank. Rocket owns routing, method matching, collision detection, and
+slash handling. There is no parallel route ordering or overlap algorithm.
+The small capture adapter pairs names from the matched route with Rocket's
+decoded request segments for the WIT request. The encoded path comes from
+Rocket's request URI. Rocket's liftoff callback reports the actual bound address
+only after ignition and binding succeed.
+
+Each request buffers a bounded body under a read timeout before attempting an
+immediate execution-slot acquisition. Synchronous runtime calls run through
+Tokio's blocking pool. The owned semaphore permit moves into the blocking job,
+so dropping an HTTP future cannot release capacity prematurely. Shutdown marks
+admission closed, notifies Rocket, and acquires all permits before
+returning, including permits held by detached jobs. Process signals are the
+CLI's responsibility; embedding callers provide a shutdown future.
+
+The runtime exposes request/response types generated from the same WIT
+used by guest workspaces. Its API does not depend on manifest or CLI types. The server
+encapsulates module IDs and confines HTTP validation, framing, and error mapping
+to the transport boundary. No separate runtime test harness is maintained:
+examples exercise it through the server, with straightforward automated socket
+checks and manual concurrency/failure scenarios.

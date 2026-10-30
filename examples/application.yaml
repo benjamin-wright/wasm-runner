@@ -12,3 +12,16 @@ functions:
     http:
       method: POST
       path: /echo
+
+  inspect:
+    dependencies:
+      serde_json: "1.0"
+    http:
+      method: GET
+      path: /users/<user_id>/orders
+
+  # Deliberately fails for manual testing: loop times out, trap panics, invalid returns a bad status.
+  misbehave:
+    http:
+      method: GET
+      path: /misbehave/<mode>

@@ -60,9 +60,9 @@
               "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
             },
             "path": {
-              "description": "An exact route starting with /; no whitespace, control characters, query, fragment, percent escapes, or wildcards.",
+              "description": "A Rocket route URI starting with /, for example /users/<user_id> or /files/<path..>. Rocket parses route URIs and checks collisions at server startup.",
               "type": "string",
-              "pattern": "^/[^\\s\\u0000-\\u001f\\u007f-\\u009f?#%*{}\\[\\]]*$"
+              "pattern": "^/"
             }
           }
         }

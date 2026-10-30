@@ -1,9 +1,8 @@
 # Build your first application
 
 This guide takes the checked-in example from Rust source to WebAssembly
-components and validated metadata. You need a local checkout of this repository
-and a shell. Run every command below from the **repository root**. No HTTP
-endpoint will be available at the end: execution and serving are not implemented.
+components and a running HTTP server. You need a local checkout of this repository
+and a shell. Run every command below from the **repository root**. Build and run are separate steps; restart the server after rebuilding.
 
 ## Prerequisites and installation
 
@@ -38,10 +37,13 @@ because it lives beneath this checkout.
 The [examples directory](../examples) is an application directory:
 
 - [application.yaml](../examples/application.yaml) names the application `hello`
-  and configures `GET /hello` for `greet` and `POST /echo` for `echo`.
+  and configures greeting, JSON echo, and request-inspection routes.
 - [functions/greet.rs](../examples/functions/greet.rs) returns a greeting.
-- [functions/echo.rs](../examples/functions/echo.rs) parses and returns JSON,
-  using its function-specific `serde_json` dependency.
+- [functions/echo.rs](../examples/functions/echo.rs) parses and returns JSON.
+- [functions/inspect.rs](../examples/functions/inspect.rs) returns decoded path
+  captures and grouped query values.
+- [functions/misbehave.rs](../examples/functions/misbehave.rs) deliberately fails
+  for [manual server checks](guides.md#manually-exercise-failures-and-concurrency).
 
 Each source defines `handle`, taking a generated `Request` and returning a
 generated `Response`. The [guest contract](../wit/README.md) explains the types.
@@ -72,40 +74,45 @@ Built <checkout>/examples/.wr/components/echo.wasm
 Built <checkout>/examples/.wr/components/greet.wasm
 ```
 
-The directory listing should contain `echo.wasm` and `greet.wasm`. Build also
+The directory listing should contain `echo.wasm`, `greet.wasm`,
+`inspect.wasm`, and `misbehave.wasm`. Build also
 generates a root Cargo manifest inside the application, wrappers under `.wr`,
 and artifacts under `target`. It merges ignore rules and editor settings.
 A handwritten application-root Cargo manifest is protected from overwrite.
 See [generated files](reference.md#generated-files) for ownership details.
 
-## Inspect the application metadata
+## Serve the application
 
 ```sh
 wr run examples --listen 127.0.0.1:9000
 ```
 
-Expected output, with your checkout path substituted:
+After all components have been prepared and the listener bound, expect:
 
 ```text
 Application: hello
-Manifest: <checkout>/examples/application.yaml
-Configured listener: 127.0.0.1:9000
-Functions: 2
-POST    /echo -> echo (<checkout>/examples/.wr/components/echo.wasm)
-GET     /hello -> greet (<checkout>/examples/.wr/components/greet.wasm)
-Metadata only; component execution and HTTP serving are not implemented yet.
+Listening on http://127.0.0.1:9000
 ```
 
-Success means the two component files exist and the manifest can be inspected.
-The `run` command validates metadata without opening components or binding the
-listener; it can also run before a build. There is no endpoint to call yet.
+In another terminal:
+
+```sh
+curl http://127.0.0.1:9000/hello
+curl -H 'Content-Type: application/json' -d '{"hello":"world"}' http://127.0.0.1:9000/echo
+curl 'http://127.0.0.1:9000/users/42/orders?status=open&tag=a&tag=b'
+```
+
+Expect `Hello, world!`, the echoed JSON object, and a JSON request description
+with `user_id` equal to `42` and the two `tag` values grouped together.
+Press Ctrl-C to stop accepting work and drain admitted executions.
+If components are missing, run the build step first. See the
+[server reference](reference.md#run) for limits and errors.
 
 ## Make a small change
 
 Change the greeting bytes in [greet.rs](../examples/functions/greet.rs), then run
 `wr build examples` again. The component is rebuilt and published at the same
-path. Metadata will still show the same route; it does not display the response
-body or execute your handler.
+path. Stop and restart `wr run examples`, then call `/hello` to see the new response.
 
 Continue with [Common tasks](guides.md) to add a function, configure dependencies,
 prepare VS Code, make a locked build, or clean generated files.

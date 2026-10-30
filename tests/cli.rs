@@ -8,6 +8,8 @@ use std::{
 const EXAMPLE: &str = include_str!("fixtures/application.yaml");
 const SETUP_APPLICATION: &str = include_str!("fixtures/setup/application.yaml");
 const GREET_FUNCTION: &str = include_str!("../examples/functions/greet.rs");
+const ECHO_FUNCTION: &str = include_str!("../examples/functions/echo.rs");
+const INSPECT_FUNCTION: &str = include_str!("../examples/functions/inspect.rs");
 const HTTP_WORLD: &str = include_str!("../wit/world.wit");
 
 struct ManifestFixture {
@@ -143,19 +145,9 @@ fn setup_previews_workspace_without_writing_files() {
     assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 2);
 
     let output = fixture.run(&[]);
-    assert!(output.status.success());
-    let metadata = String::from_utf8(output.stdout).unwrap();
-    for name in ["greet", "echo"] {
-        assert!(
-            metadata.contains(
-                fixture
-                    .directory
-                    .join(format!(".wr/components/{name}.wasm"))
-                    .to_str()
-                    .unwrap()
-            )
-        );
-    }
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("wr build"));
 }
 
 #[test]
@@ -501,70 +493,44 @@ fn clean_removes_directory_symlinks_without_following_them() {
 }
 
 #[test]
-fn run_prints_metadata_without_requiring_components_or_announcing_readiness() {
+fn run_requires_built_compatible_components_before_readiness() {
     let fixture = ManifestFixture::new(EXAMPLE);
-    for address in [None, Some("0.0.0.0:9000"), Some("[::1]:9000")] {
-        let mut arguments = vec![];
-        if let Some(address) = address {
-            arguments.extend(["--listen", address]);
-        }
+    let output = fixture.run(&[]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("wr build"));
+    assert!(error.contains(".wasm"));
+    fs::create_dir_all(fixture.directory.join(".wr/components")).unwrap();
+    for name in ["greet", "echo"] {
+        fs::write(
+            fixture
+                .directory
+                .join(format!(".wr/components/{name}.wasm")),
+            b"invalid component",
+        )
+        .unwrap();
+    }
+    let output = fixture.run(&[]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("registering handler"));
+}
 
-        let output = fixture.run(&arguments);
+#[test]
+fn setup_accepts_distinct_routes_and_supported_methods() {
+    for method in ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+        let source = format!(
+            "name: routes\nfunctions:\n  get:\n    http: {{method: {method}, path: '/users/<id>'}}\n  post:\n    http: {{method: POST, path: /same}}\n  slash:\n    http: {{method: GET, path: /same/}}\n"
+        );
+        let fixture = ManifestFixture::new(&source);
+        let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.stderr.is_empty());
-        let metadata = String::from_utf8(output.stdout).unwrap();
-        for expected in [
-            "Application: hello",
-            "Functions: 2",
-            "GET",
-            "POST",
-            "/hello -> greet",
-            "/echo -> echo",
-            "Metadata only",
-            address.unwrap_or("127.0.0.1:8080"),
-            fixture.path.to_str().unwrap(),
-            fixture
-                .directory
-                .join(".wr/components/greet.wasm")
-                .to_str()
-                .unwrap(),
-            fixture
-                .directory
-                .join(".wr/components/echo.wasm")
-                .to_str()
-                .unwrap(),
-        ] {
-            assert!(
-                metadata.contains(expected),
-                "missing {expected:?} in {metadata}"
-            );
-        }
-        assert!(!metadata.contains("listening on"));
-        assert!(
-            metadata.find("/echo -> echo").unwrap() < metadata.find("/hello -> greet").unwrap()
-        );
     }
-}
-
-#[test]
-fn run_accepts_distinct_routes() {
-    let fixture = ManifestFixture::new(
-        "name: routes\nfunctions:\n  get:\n    http: {method: GET, path: /same}\n  post:\n    http: {method: POST, path: /same}\n  slash:\n    http: {method: GET, path: /same/}\n",
-    );
-    let output = fixture.run(&[]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let metadata = String::from_utf8(output.stdout).unwrap();
-    assert!(metadata.contains("GET     /same -> get"));
-    assert!(metadata.contains("POST    /same -> post"));
-    assert!(metadata.contains("GET     /same/ -> slash"));
 }
 
 #[test]
@@ -573,58 +539,41 @@ fn yaml_strings_preserve_literal_values() {
         .replace("name: hello", "name: on")
         .replace("greet:", "off:");
     let fixture = ManifestFixture::new(&source);
-    let output = fixture.run(&[]);
+    let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let metadata = String::from_utf8(output.stdout).unwrap();
-    assert!(metadata.contains("Application: on"));
-    assert!(metadata.contains("/hello -> off"));
-    assert!(
-        metadata.contains(
-            fixture
-                .directory
-                .join(".wr/components/off.wasm")
-                .to_str()
-                .unwrap()
-        )
-    );
+    let preview = String::from_utf8(output.stdout).unwrap();
+    assert!(preview.contains("Workspace preview for on"));
+    assert!(preview.contains(".wr/functions/off/"));
 }
 
 #[test]
 fn yaml_aliases_and_merges_are_validated_after_resolution() {
-    let source = "\
-name: !!str on
-functions:
-  greet: &handler
-    http: {method: GET, path: /hello}
-  echo:
-    <<: *handler
-    http: {method: POST, path: /echo}
-";
+    let source = "name: !!str on\nfunctions:\n  greet: &handler\n    http: {method: GET, path: /hello}\n  echo:\n    <<: *handler\n    http: {method: POST, path: /echo}\n";
     let fixture = ManifestFixture::new(source);
-    let output = fixture.run(&[]);
+    let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let metadata = String::from_utf8(output.stdout).unwrap();
-    assert!(metadata.contains("Application: on"));
-    assert!(metadata.contains("/hello -> greet"));
-    assert!(metadata.contains("/echo -> echo"));
+    let preview = String::from_utf8(output.stdout).unwrap();
+    assert!(preview.contains("Workspace preview for on"));
+    for name in ["greet", "echo"] {
+        assert!(preview.contains(&format!(".wr/functions/{name}/")));
+    }
     for invalid in [
         source.replace("method: GET", "method: invalid"),
-        source.replace("    http: {method: POST, path: /echo}\n", ""),
+        source.replace("path: /hello", "path: relative"),
     ] {
         let fixture = ManifestFixture::new(&invalid);
         let output = fixture.run(&[]);
         assert_eq!(output.status.code(), Some(1), "accepted {invalid}");
         assert!(output.stdout.is_empty());
-        let error = String::from_utf8(output.stderr).unwrap();
-        assert!(error.contains("/functions/"), "{error}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("/functions/"));
     }
 }
 
@@ -635,38 +584,17 @@ fn schema_accepts_identifier_boundaries_and_literal_paths() {
         .replace("name: hello", &format!("name: {identifier}"))
         .replace("greet:", &format!("{identifier}:"))
         .replace("path: /hello", "path: /")
-        .replace("path: /echo", "path: /café/");
+        .replace("path: /echo", "path: /caf%C3%A9/");
     let fixture = ManifestFixture::new(&source);
-    let output = fixture.run(&[]);
+    let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let metadata = String::from_utf8(output.stdout).unwrap();
-    assert!(metadata.contains(&format!("Application: {identifier}")));
-    assert!(metadata.contains(&format!("/ -> {identifier}")));
-    assert!(metadata.contains("/café/ -> echo"));
-}
-
-#[test]
-fn all_supported_methods_are_printed_in_uppercase() {
-    for method in ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
-        let fixture =
-            ManifestFixture::new(&EXAMPLE.replace("method: GET", &format!("method: {method}")));
-        let output = fixture.run(&[]);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let metadata = String::from_utf8(output.stdout).unwrap();
-        let route = metadata
-            .lines()
-            .find(|line| line.contains("/hello -> greet"))
-            .unwrap();
-        assert_eq!(route.split_whitespace().next(), Some(method));
-    }
+    let preview = String::from_utf8(output.stdout).unwrap();
+    assert!(preview.contains(&format!("Workspace preview for {identifier}")));
+    assert!(preview.contains(&format!(".wr/functions/{identifier}/")));
 }
 
 #[test]
@@ -706,7 +634,7 @@ fn invalid_manifests_fail_before_printing_metadata() {
             &["/functions/greet/http/method", "get"][..],
         ),
         (
-            EXAMPLE.replace("path: /hello", "path: /hello?query"),
+            EXAMPLE.replace("path: /hello", "path: /hello#fragment"),
             &["/functions/greet/http/path"][..],
         ),
         (
@@ -726,18 +654,8 @@ fn invalid_manifests_fail_before_printing_metadata() {
             &["/functions/greet/http/path"][..],
         ),
         (
-            EXAMPLE.replace("path: /hello", "path: '/{parameter}'"),
+            EXAMPLE.replace("path: /hello", "path: '/{parameter:.*}'"),
             &["/functions/greet/http/path"][..],
-        ),
-        (
-            EXAMPLE.replace("path: /hello", "path: '/percent%20escape'"),
-            &["/functions/greet/http/path"][..],
-        ),
-        (
-            EXAMPLE
-                .replace("method: POST", "method: GET")
-                .replace("path: /echo", "path: /hello"),
-            &["duplicate"][..],
         ),
         (
             EXAMPLE.replace("name: hello", "name: hello\nextra: true"),
@@ -877,7 +795,13 @@ fn setup_discovers_all_direct_rust_sources_and_rejects_invalid_names() {
 
 #[test]
 fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
-    let fixture = ManifestFixture::new(EXAMPLE);
+    let fixture = ManifestFixture::new(&format!("{EXAMPLE}\ndependencies:\n  serde_json: '1.0'\n"));
+    fs::write(fixture.directory.join("functions/echo.rs"), ECHO_FUNCTION).unwrap();
+    fs::write(
+        fixture.directory.join("functions/inspect.rs"),
+        INSPECT_FUNCTION,
+    )
+    .unwrap();
     fs::write(
         fixture.directory.join("functions/unlisted-target.rs"),
         GREET_FUNCTION,
@@ -902,7 +826,7 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
         } else {
             "debug"
         };
-        for name in ["echo", "greet", "unlisted-target"] {
+        for name in ["echo", "greet", "inspect", "unlisted-target"] {
             let component = fs::read(
                 fixture
                     .directory
@@ -926,7 +850,7 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
                 resolve.worlds[world]
                     .exports
                     .keys()
-                    .any(|key| { resolve.name_world_key(key) == "local:http/handler@0.1.0" })
+                    .any(|key| { resolve.name_world_key(key) == "local:http/handler@0.2.0" })
             );
         }
         assert!(!fixture.directory.join("ignored-target").exists());
@@ -949,6 +873,8 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
         }
     }
 
+    serve_built_examples(&fixture.directory);
+
     let lockfile = fs::read(fixture.directory.join("Cargo.lock")).unwrap();
     let destination = fixture.directory.join(".wr/components/greet.wasm");
     let previous = fs::read(&destination).unwrap();
@@ -962,4 +888,91 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
         fs::read(fixture.directory.join("Cargo.lock")).unwrap(),
         lockfile
     );
+}
+
+fn serve_built_examples(directory: &std::path::Path) {
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        time::Duration,
+    };
+    use wasm_runner::server::{self, Config, Handler};
+
+    let handlers = [
+        ("inspect", "GET", "/users/<user_id>/orders"),
+        ("inspect", "POST", "/users/<owner>/orders"),
+        ("inspect", "GET", "/files/<path..>"),
+        ("greet", "GET", "/users/me/orders"),
+        ("greet", "GET", "/hello/"),
+        ("echo", "POST", "/echo"),
+    ]
+    .into_iter()
+    .map(|(name, method, path)| Handler {
+        name: name.into(),
+        method: method.into(),
+        path: path.into(),
+        component: fs::read(directory.join(format!(".wr/components/{name}.wasm"))).unwrap(),
+    })
+    .collect();
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
+        let config = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            max_request_body: 64,
+            ..Config::default()
+        };
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (ready, address) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(server::serve(config.clone(), handlers,
+            async { let _ = stopped.await; },
+            move |address| { let _ = ready.send(address); }));
+        let address = address.await.unwrap();
+        let client = tokio::task::spawn_blocking(move || {
+            let request = |method: &str, path: &str, body: &str| {
+                let mut socket = TcpStream::connect(address).unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                write!(socket, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+                let mut response = String::new();
+                socket.read_to_string(&mut response).unwrap();
+                response
+            };
+            let response = request("GET", "/users/a%2Fb/orders?tag=a&flag&tag=b&plus=%2B+", "");
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            let body: serde_json::Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["path"], "/users/a%2Fb/orders");
+            assert_eq!(body["path_params"], serde_json::json!([["user_id", "a/b"]]));
+            assert_eq!(body["query"], serde_json::json!([["tag", ["a", "b"]], ["flag", [""]], ["plus", ["+ "]]]));
+            let response = request("POST", "/users/42/orders", "");
+            assert!(response.contains("[[\"owner\",\"42\"]]"), "{response}");
+            let response = request("GET", "/users/me/orders", "");
+            assert!(response.ends_with("Hello, world!"), "{response}");
+            let response = request("POST", "/users/me/orders", "");
+            assert!(response.contains("[[\"owner\",\"me\"]]"), "{response}");
+            let response = request("GET", "/files/a/b%20c", "");
+            assert!(response.contains("[[\"path\",\"a/b c\"]]"), "{response}");
+            let response = request("HEAD", "/hello/", "");
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert!(response.split_once("\r\n\r\n").unwrap().1.is_empty());
+            for (method, path, code) in [("GET", "/hello", 200), ("OPTIONS", "/hello/", 404), ("GET", "/users//orders", 404)] {
+                let response = request(method, path, "");
+                assert!(response.starts_with(&format!("HTTP/1.1 {code}")), "{response}");
+            }
+            assert!(request("POST", "/echo", "{}").ends_with("{}"));
+            assert!(request("POST", "/echo", "invalid").starts_with("HTTP/1.1 400"));
+            assert!(request("POST", "/echo", &"x".repeat(65)).starts_with("HTTP/1.1 413"));
+        }).await;
+        let _ = stop.send(());
+        running.await.unwrap().unwrap();
+        client.unwrap();
+
+        // Both patterns have Rocket's partial-path rank and overlap at /a/b.
+        let conflicting = ["/a/<x>", "/<y>/b"].into_iter().map(|path| Handler {
+            name: path.into(),
+            method: "GET".into(),
+            path: path.into(),
+            component: fs::read(directory.join(".wr/components/greet.wasm")).unwrap(),
+        }).collect();
+        let error = server::serve(config, conflicting, std::future::pending(),
+            |_| panic!("conflicting routes must fail before readiness")).await.unwrap_err();
+        assert!(error.to_string().contains("collision"), "{error:#}");
+    });
 }

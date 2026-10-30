@@ -23,7 +23,7 @@ enum Command {
     Run(run::Run),
 }
 
-pub(crate) fn execute() -> Result<()> {
+pub fn execute() -> Result<()> {
     match Cli::parse().command {
         Command::Setup(command) => command.execute(),
         Command::Build(command) => command.execute(),

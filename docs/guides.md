@@ -27,8 +27,9 @@ wr build examples
 wr run examples
 ```
 
-Build should report `.wr/components/status.wasm`, and metadata should include
-`GET /status`. This configures a future endpoint; it does not start serving it.
+Build should report `.wr/components/status.wasm`. After the readiness message,
+call `curl http://127.0.0.1:8080/status` in another terminal. Stop and restart
+the server after changing routes or rebuilding components.
 You can also build an unlisted source without giving it a route. See
 [source discovery](reference.md#source-discovery) for filename rules and the
 requirement to keep at least one configured function in the manifest.
@@ -145,3 +146,34 @@ reported path and correct the filesystem problem before retrying.
 Regenerate with `wr setup examples` for editor preparation or
 `wr build examples` for components. See [cleanup behavior](reference.md#clean)
 for the exact removal and preservation set.
+
+## Manually exercise failures and concurrency
+
+The example application includes [misbehave](../examples/functions/misbehave.rs),
+a deliberately failing handler for local manual testing. Its source and manifest
+entry explicitly mark that purpose:
+
+```sh
+wr build examples
+wr run examples --listen 127.0.0.1:9001
+```
+
+In another terminal, `/misbehave/ok` should always return `1`, demonstrating
+fresh guest state. `/misbehave/trap` and `/misbehave/invalid` return 500;
+`/misbehave/loop` returns 504 after the execution allowance. Subsequent
+`/misbehave/ok` requests should still succeed:
+
+```sh
+curl -i http://127.0.0.1:9001/misbehave/ok
+curl -i http://127.0.0.1:9001/misbehave/trap
+curl -i http://127.0.0.1:9001/misbehave/invalid
+curl -i http://127.0.0.1:9001/misbehave/loop
+curl -i http://127.0.0.1:9001/misbehave/ok
+seq 20 | xargs -P20 -I{} curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9001/misbehave/loop
+```
+
+With the default 16 execution slots, simultaneous looping requests should show
+both 503 (overload) and 504 (admitted execution timeout). While loops are active,
+Ctrl-C should drain admitted jobs before exiting. Also try cancelling a looping
+client: its execution slot remains occupied until the guest times out. These
+concurrency and shutdown checks are manual rather than timing-sensitive tests.

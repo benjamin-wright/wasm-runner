@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fmt, fs,
     path::{Path, PathBuf},
 };
@@ -83,17 +83,14 @@ pub(crate) fn load(directory: &Path) -> Result<ApplicationDefinition> {
         .with_context(|| format!("reading manifest {}", path.display()))?;
     let mut application =
         parse(&source).with_context(|| format!("parsing manifest {}", path.display()))?;
-    let mut routes = HashSet::new();
     for (name, function) in &mut application.functions {
+        rocket::http::uri::Origin::parse_route(&function.http.path).map_err(|error| {
+            anyhow::anyhow!(
+                "{}: /functions/{name}/http/path: invalid Rocket route: {error}",
+                path.display()
+            )
+        })?;
         function.module = directory.join(format!(".wr/components/{name}.wasm"));
-        if !routes.insert((function.http.method, &function.http.path)) {
-            bail!(
-                "{}: /functions/{name}/http: duplicate method/path pair ({} {})",
-                path.display(),
-                function.http.method,
-                function.http.path
-            );
-        }
     }
     for name in application.functions.keys() {
         let source = directory.join("functions").join(format!("{name}.rs"));

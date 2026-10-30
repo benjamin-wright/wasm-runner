@@ -17,7 +17,7 @@ filenames are not supported. Clean does not load a manifest.
 | `wr setup <DIRECTORY> [--dry-run]` | Generate the guest workspace, or preview paths and contents without writing. |
 | `wr build <DIRECTORY> [--release] [--locked]` | Refresh the workspace and compile components. Debug is the default; `--release` selects optimization; `--locked` requires an up-to-date guest lockfile. |
 | `wr clean <DIRECTORY>` | Remove generated workspace files and build outputs. |
-| `wr run <DIRECTORY> [--listen <IP:PORT>]` | Validate and print metadata. The listener defaults to `127.0.0.1:8080`; no socket is opened. |
+| `wr run <DIRECTORY> [--listen <IP:PORT>]` | Serve previously built handlers. The listener defaults to `127.0.0.1:8080`. |
 
 Use `wr --help`, `wr --version`, or `wr <COMMAND> --help` to inspect the CLI.
 Arguments after `wr` go directly to the application.
@@ -31,11 +31,26 @@ are lowercase identifiers of 1 to 64 letters, digits, or hyphens, starting with
 a letter.
 
 The [JSON Schema draft-07 document](../application.schema.json) defines field
-constraints, supported methods, and literal route paths. Unknown fields are
-rejected. Routes are exact paths, not wildcard patterns; the schema excludes
-whitespace, control characters, query strings, fragments, percent escapes, and
-wildcard syntax. A method/path pair may appear only once; distinct methods may
-use the same path.
+constraints and supported methods. Unknown fields are rejected. `http.path`
+is a [Rocket route URI](https://api.rocket.rs/v0.5/rocket/struct.Route.html),
+parsed by Rocket itself. Use `/users/<user_id>/orders` for a single-segment
+capture or `/files/<path..>` for a trailing capture. Query constraints and
+percent-encoded literals follow Rocket's rules. The old `{name}` syntax is
+not supported.
+
+Routes use Rocket's default ranks and collision rules. For routes without
+query constraints, fully static paths rank before partially dynamic paths,
+which rank before fully dynamic paths. This is a category ranking, not a
+per-segment specificity calculation. Overlapping routes with the same method
+and rank fail server startup, including `/a/<x>` and `/<y>/b`. Route conflicts
+are checked when running, not when generating or building the guest workspace.
+There is no custom rank setting.
+
+Method matching participates in route selection: with `GET /users/me` and
+`POST /users/<id>`, a POST to `/users/me` invokes the latter with `id=me`.
+Rocket normalizes route slashes and ignores empty path segments when matching;
+trailing slashes do not distinguish routes. Manifest iteration order does not
+resolve collisions.
 
 One YAML document is accepted, including anchors, aliases, and merge keys.
 Duplicate mapping keys are rejected. The schema is embedded in `wr` and does
@@ -45,7 +60,7 @@ schema directly.
 Every configured function must have a matching `functions/<name>.rs` file.
 Component paths are inferred as `.wr/components/<name>.wasm` relative to the
 application directory. Prebuilt `module` declarations are rejected. Components
-need not exist for setup or metadata output.
+need not exist for setup, but run requires compatible built components.
 
 Application settings come from the manifest, and the listener setting comes
 from the command line. Environment variables do not override those settings.
@@ -62,7 +77,7 @@ Manifest entries configure routes and function-specific dependencies, not build
 membership. Unlisted functions inherit common dependencies and have no route.
 The manifest must still contain at least one configured function: support for
 extra unlisted sources does not imply support for a completely route-free
-application. Run reports configured functions only.
+application. Run serves configured functions only.
 
 ## Dependencies
 
@@ -84,9 +99,10 @@ A schema-valid manifest alone does not guarantee that setup or build succeeds.
 
 | Stage | Commands | Checks |
 | --- | --- | --- |
-| Manifest loading | setup, build, run | Parse YAML, resolve merges, validate against the embedded schema, deserialize, reject duplicate routes, and check configured source files exist. |
+| Manifest loading | setup, build, run | Parse YAML, resolve merges, validate against the embedded schema, deserialize, parse route URIs with Rocket, and check configured source files exist. |
 | Discovery and generation | setup, build | Validate discovered source names and require sources; reject reserved or conflicting dependencies; merge ignore rules and validate editor settings. |
 | Workspace writing | setup without `--dry-run`, build | Refuse a handwritten root Cargo manifest before any writes; then create or update generated files. |
+| Server preparation | run | Read every configured component, validate imports and the guest contract, compile native code, let Rocket reject route collisions, then bind the listener. |
 | Compilation and publication | build | Cargo checks Rust and dependencies; after successful compilation, require every expected artifact before copying components. |
 | Cleanup | clean | Require an existing directory and check root Cargo manifest ownership before any removals. |
 
@@ -210,18 +226,100 @@ identify the path; removal is not transactional. Success reports
 
 ## Run
 
-Run reports the application name, manifest path, configured listener, configured
-function count, and routes with resolved component paths in function-name order.
-It explicitly states that component execution and HTTP serving are not
-implemented. Components are not opened, and no listener is bound; a build is not
-required for metadata output.
+Run loads the manifest and existing `.wr/components/<name>.wasm` files. It never
+invokes Cargo. Missing components report their function and path with a
+build-first instruction. All routes and components must pass preparation before
+binding. `Listening on http://<address>` is printed only after preparation and
+binding succeed; startup failure prints no readiness message. Port zero lets
+the OS choose a port and the message reports the actual address.
 
 `--listen` accepts a numeric IPv4 address or bracketed IPv6 address with a port,
-such as `127.0.0.1:9000` or `[::1]:9000`. Hostnames are rejected.
+such as `127.0.0.1:9000` or `[::1]:9000`. Hostnames are rejected. There is no
+implicit exposure beyond the default loopback address.
+
+The library's async `server::serve(config, handlers, shutdown_future, on_ready)`
+accepts component bytes without a CLI or manifest, inside a Tokio runtime.
+The readiness callback receives the bound address; the future returns after
+shutdown and draining admitted executions.
+Only the CLI installs process signal handlers (Ctrl-C and SIGTERM on Unix).
+
+| Setting | CLI default (configurable through library `server::Config`) |
+| --- | --- |
+| Execution timeout | 5 seconds |
+| Maximum concurrent executions | 16, shared across all workers |
+| Maximum request body | 1 MiB |
+| Request-body timeout | 10 seconds; HTTP header handling follows Rocket's transport defaults |
+
+Synchronous invocations run on blocking threads. Admission has no application
+waiting queue: excess invocations receive 503. A slot is held until execution
+actually ends, including after a client disconnects. The execution allowance
+starts inside the blocking job and includes instantiation and handling, not
+registration or time waiting for a blocking thread. Epoch interruption traps
+nonterminating guest code with approximately 5 ms tick/checkpoint granularity.
+Shutdown stops execution admission, gracefully stops HTTP workers, and drains
+admitted jobs before releasing the runtime and its ticker.
+
+The guest receives Rocket's encoded request path, decoded named captures, and
+form-decoded query pairs. Each decoded key appears once, in first-occurrence
+order, with values in encounter order. Empty/absent queries yield no pairs;
+`?flag` and `?flag=` both yield an empty string value. `+` decodes to a space;
+`%2B` decodes to a literal plus. Malformed UTF-8 in captures and query fields
+uses replacement characters. Headers retain repeated values; request header
+values follow Rocket's HTTP parsing. A trailing capture joins its decoded
+segments with `/`; ignored `<_>` captures are omitted from `path-params`.
+Route query constraints affect matching, while the guest still receives all
+query pairs.
+
+| Condition | HTTP result |
+| --- | --- |
+| No matching route for the path and method | 404 (except Rocket's HEAD fallback) |
+| Execution capacity exhausted or shutdown admission closed | 503 |
+| Request body over the size limit | 413 |
+| Request-body reading expires | 408 |
+| Guest execution timeout | 504 |
+| Guest trap or invalid guest response | 500 |
+
+Rocket tries an explicit HEAD route first, then falls back to GET and strips
+the response body. On fallback the guest sees method GET. OPTIONS requires an
+explicit route; no CORS handling is installed. Guest HTTP error responses
+are successful invocations and retain their status. Final guest statuses must
+be 200–599 and header names/values must be HTTP-valid. Hop-by-hop headers,
+headers named by `Connection`, and guest `Content-Length` are removed; transport
+framing is computed by the server. Bodies are suppressed where HTTP requires
+it, including HEAD and statuses 204, 205, and 304. Execution diagnostics go to
+host stderr; generated error responses have empty bodies.
+
+### Runtime and WASI policy
+
+`runtime::Runtime::new(timeout)` creates the engine and its owned epoch ticker.
+`register(bytes)` compiles and validates a component, returning an opaque
+`ModuleId`; `execute(&id, &Request)` synchronously returns `Response` or
+`ExecutionError`. IDs belong to their original runtime. Registration uses a
+mutable runtime; subsequent invocations may share it concurrently. Each call
+gets a new instance, store, resource table, and WASI context. The runtime does
+no routing, parsing, socket handling, or job scheduling.
+
+Supported imports are the WASI 0.2 interfaces for CLI environment, exit,
+stdin/stdout/stderr and terminals; I/O error, streams, and poll; and the monotonic
+clock. These are the imports introduced by the current Rust target in the
+examples. Import versions/types must be compatible with the host. No environment,
+arguments, preopened directories, or network access is inherited. Stdin is
+closed; stdout and stderr are sinks; no terminals are available. Monotonic clock
+reads report time since invocation; timer subscriptions trap because native
+WASI waits cannot be interrupted by guest epochs. Filesystem, random, socket,
+wall-clock, and custom host interfaces are not supported in this increment.
+Unsupported imports and incompatible guest interfaces fail registration.
+The guest contract is `local:http/handler@0.2.0`; components
+built with the earlier request shape must be rebuilt.
+
+Epoch interruption cannot forcibly terminate arbitrary host code or undo
+external effects. Any future host I/O must honor the remaining execution
+deadline. Memory quotas, streaming, hot reload, SQL/KV bindings, and custom
+scheduling are outside this increment.
 
 ## Output and errors
 
 Successful commands exit zero. Invalid arguments, manifest loading or validation
 failures, and failed operations exit nonzero. Manifest failures produce no
-metadata output. Diagnostics use parsing and validation library detail with
+readiness output. Diagnostics use parsing and validation library detail with
 basic operation context; no particular error-location format is guaranteed.

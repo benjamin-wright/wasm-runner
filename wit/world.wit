@@ -1,10 +1,11 @@
-package local:http@0.1.0;
+package local:http@0.2.0;
 
 interface handler {
     record request {
         method: string,
         path: string,
-        query: option<string>,
+        path-params: list<tuple<string, string>>,
+        query: list<tuple<string, list<string>>>,
         headers: list<tuple<string, string>>,
         body: list<u8>,
     }

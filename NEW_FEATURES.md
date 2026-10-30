@@ -1,8 +1,18 @@
-# Planned features
+# Runtime and server feature design
+
+These accepted designs have been implemented. This page records their original
+scope; [requirements](SPEC.md), [reference](docs/reference.md), and
+[architecture](ARCHITECTURE.md) own the maintained behavior.
+
+The original R10 transport design below has been superseded by the switch to
+Rocket. The current implementation adopts Rocket's route URI syntax, default
+ranks, collision checks, method matching, slash handling, and HEAD fallback.
+See the [current route contract](docs/reference.md#manifest); the Actix-specific
+rules below are historical, not additional implementation requirements.
 
 ## R9: Execute HTTP handler components through a reusable runtime
 
-**Status:** Agreed design; not implemented.
+**Status:** Implemented; current behavior is maintained in [the reference](docs/reference.md#runtime-and-wasi-policy).
 
 Provide a self-contained runtime that executes a selected WebAssembly component
 for an HTTP request without depending on the CLI, application manifest, or HTTP
@@ -54,7 +64,7 @@ forcibly terminate arbitrary host code or undo external side effects.
 
 ## R10: Serve built applications over HTTP
 
-**Status:** Agreed design; not implemented. Depends on R9.
+**Status:** Implemented; current behavior is maintained in [the reference](docs/reference.md#run). Depends on R9.
 
 Make `wr run <DIRECTORY> [--listen <IP:PORT>]` serve the application's configured
 handlers using Actix Web. Build remains a separate step: run reads existing
@@ -160,8 +170,8 @@ deadlines, and release the runtime and its ticker.
 - Shutdown drains admitted executions and releases server/runtime resources.
 
 Explicit prebuilt-module manifest declarations, automatic builds, hot reload,
-TLS configuration, rate limiting, and streaming are deferred. Choose concrete
-limit defaults during implementation. Update the authoritative schema, WIT,
+TLS configuration, rate limiting, and streaming are deferred. Concrete limit
+defaults and implemented behavior are maintained in the authoritative schema, WIT,
 [requirements](SPEC.md), [reference](docs/reference.md),
-[architecture](ARCHITECTURE.md), and affected examples/guides with the behaviour;
-this document records planned work rather than current capability.
+[architecture](ARCHITECTURE.md), and affected examples/guides;
+this document records the original feature scope.

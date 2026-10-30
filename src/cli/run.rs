@@ -1,15 +1,16 @@
 use std::{
     io::{self, Write},
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
+use crate::services::server::{self, Config};
 use anyhow::Result;
 use clap::Args;
 
-use crate::services::manifest::{self, ApplicationDefinition};
+use crate::services::{loader, manifest};
 
-/// Load an application YAML manifest and print metadata (serving not yet implemented)
+/// Serve an application's previously built HTTP components
 #[derive(Args)]
 pub(super) struct Run {
     /// Application directory containing application.yaml
@@ -25,38 +26,41 @@ impl Run {
     pub(super) fn execute(self) -> Result<()> {
         let directory = super::resolve_directory(&self.directory)?;
         let application = manifest::load(&directory)?;
-        print_metadata(&directory, &application, self.listen)
+        let handlers = loader::load_handlers(&application)?;
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                // Install signal listeners before announcing readiness.
+                #[cfg(unix)]
+                let mut terminate =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+                #[cfg(unix)]
+                let mut interrupt =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+                server::serve(
+                    Config {
+                        listen: self.listen,
+                        ..Config::default()
+                    },
+                    handlers,
+                    async {
+                        #[cfg(unix)]
+                        tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
+                        #[cfg(not(unix))]
+                        if let Err(error) = tokio::signal::ctrl_c().await {
+                            eprintln!("signal listener failed: {error}");
+                        }
+                    },
+                    move |address| {
+                        println!("Application: {}", application.name);
+                        println!("Listening on http://{address}");
+                        if let Err(error) = io::stdout().flush() {
+                            eprintln!("flushing readiness output: {error}");
+                        }
+                    },
+                )
+                .await
+            })
     }
-}
-
-fn print_metadata(
-    directory: &Path,
-    application: &ApplicationDefinition,
-    listen: SocketAddr,
-) -> Result<()> {
-    let mut output = io::stdout().lock();
-    writeln!(output, "Application: {}", application.name)?;
-    writeln!(
-        output,
-        "Manifest: {}",
-        directory.join("application.yaml").display()
-    )?;
-    writeln!(output, "Configured listener: {listen}")?;
-    writeln!(output, "Functions: {}", application.functions.len())?;
-    let mut functions: Vec<_> = application.functions.iter().collect();
-    functions.sort_unstable_by_key(|(name, _)| *name);
-    for (name, function) in functions {
-        writeln!(
-            output,
-            "{:<7} {} -> {name} ({})",
-            function.http.method,
-            function.http.path,
-            function.module.display()
-        )?;
-    }
-    writeln!(
-        output,
-        "Metadata only; component execution and HTTP serving are not implemented yet."
-    )?;
-    Ok(())
 }
