@@ -45,19 +45,36 @@ impl Run {
                     listen: self.listen,
                     ..Config::default()
                 };
-                let applications = Applications::new(config.clone())?;
+                let storage = std::sync::Arc::new(crate::persistence::Storage::new(std::fs::canonicalize(&directory)?.join(".wr-data/kv")));
+                let applications = Applications::with_storage(config.clone(), Some(storage.clone()))?;
                 applications
-                    .install(application.name.clone(), application.path_prefix, handlers)
+                    .install(application.name.clone(), application.path_prefix, handlers, application.kv)
                     .await?;
-                server::serve_applications(
+                let diagnostics = applications.clone();
+                let result = server::serve_applications(
                     config,
                     applications,
-                    async {
-                        #[cfg(unix)]
-                        tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
-                        #[cfg(not(unix))]
-                        if let Err(error) = tokio::signal::ctrl_c().await {
-                            eprintln!("signal listener failed: {error}");
+                    async move {
+                        let signals = async {
+                            #[cfg(unix)]
+                            tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
+                            #[cfg(not(unix))]
+                            if let Err(error) = tokio::signal::ctrl_c().await {
+                                eprintln!("signal listener failed: {error}");
+                            }
+                        };
+                        let metrics = async {
+                            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                            loop {
+                                interval.tick().await;
+                                if let Ok(info) = diagnostics.storage_info().await && info.opened {
+                                    eprintln!("KV storage: {}", serde_json::to_string(&info).expect("storage metadata"));
+                                }
+                            }
+                        };
+                        tokio::select! {
+                            () = signals => {},
+                            () = metrics => {},
                         }
                     },
                     move |address| {
@@ -68,7 +85,9 @@ impl Run {
                         }
                     },
                 )
-                .await
+                .await;
+                let synced = tokio::task::spawn_blocking(move || storage.sync()).await?;
+                result.and(synced)
             })
     }
 }

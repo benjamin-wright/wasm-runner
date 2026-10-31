@@ -34,6 +34,8 @@ pub(crate) struct ApplicationDefinition {
     #[serde(rename = "path-prefix")]
     pub path_prefix: String,
     #[serde(default)]
+    pub kv: bool,
+    #[serde(default)]
     pub dependencies: Dependencies,
     pub functions: HashMap<String, FunctionDefinition>,
 }

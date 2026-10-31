@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::persistence::{KvError, KvStore, KvValue};
 use anyhow::{Context, Result, bail, ensure};
 use wasmtime::{
     Config, Engine, Store, Trap,
@@ -13,7 +14,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-wasmtime::component::bindgen!({ path: "wit", world: "http-function" });
+wasmtime::component::bindgen!({ path: "wit", world: "http-function", imports: { default: trappable } });
 
 pub use exports::local::http::handler::{Request, Response};
 
@@ -49,6 +50,77 @@ struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     started: Instant,
+    timeout: Duration,
+    kv: Option<Arc<KvStore>>,
+}
+
+impl HostState {
+    fn kv_call<T>(
+        &self,
+        call: impl FnOnce(&KvStore) -> Result<T, KvError>,
+    ) -> Result<Result<T, local::kv::store::KvError>> {
+        ensure!(
+            self.started.elapsed() < self.timeout,
+            "invocation expired before KV call"
+        );
+        let result = match &self.kv {
+            Some(store) => call(store).map_err(|error| match error {
+                KvError::InvalidKey => local::kv::store::KvError::InvalidKey,
+                KvError::ValueTooLarge => local::kv::store::KvError::ValueTooLarge,
+                KvError::TypeMismatch => local::kv::store::KvError::TypeMismatch,
+                KvError::Overflow => local::kv::store::KvError::Overflow,
+                KvError::Storage => local::kv::store::KvError::Storage,
+            }),
+            None => Err(local::kv::store::KvError::Disabled),
+        };
+        ensure!(
+            self.started.elapsed() < self.timeout,
+            "invocation expired after KV call"
+        );
+        Ok(result)
+    }
+}
+
+impl local::kv::store::Host for HostState {
+    fn get(
+        &mut self,
+        key: String,
+    ) -> Result<Result<Option<local::kv::store::Value>, local::kv::store::KvError>> {
+        self.kv_call(|store| {
+            store.get(&key).map(|value| {
+                value.map(|value| match value {
+                    KvValue::Bytes(value) => local::kv::store::Value::Bytes(value),
+                    KvValue::Text(value) => local::kv::store::Value::Text(value),
+                    KvValue::Integer(value) => local::kv::store::Value::Integer(value),
+                })
+            })
+        })
+    }
+
+    fn set(
+        &mut self,
+        key: String,
+        value: local::kv::store::Value,
+    ) -> Result<Result<(), local::kv::store::KvError>> {
+        self.kv_call(|store| {
+            store.set(
+                &key,
+                match value {
+                    local::kv::store::Value::Bytes(value) => KvValue::Bytes(value),
+                    local::kv::store::Value::Text(value) => KvValue::Text(value),
+                    local::kv::store::Value::Integer(value) => KvValue::Integer(value),
+                },
+            )
+        })
+    }
+
+    fn delete(&mut self, key: String) -> Result<Result<bool, local::kv::store::KvError>> {
+        self.kv_call(|store| store.delete(&key))
+    }
+
+    fn increment(&mut self, key: String) -> Result<Result<i64, local::kv::store::KvError>> {
+        self.kv_call(|store| store.increment(&key))
+    }
 }
 
 impl WasiView for HostState {
@@ -65,6 +137,7 @@ pub struct Runtime {
     modules: Vec<HttpFunctionPre<HostState>>,
     owner: Arc<()>,
     timeout: Duration,
+    kv: Option<Arc<KvStore>>,
     stop: mpsc::Sender<()>,
     ticker: Option<JoinHandle<()>>,
 }
@@ -99,15 +172,26 @@ impl Runtime {
             modules: Vec::new(),
             owner: Arc::new(()),
             timeout,
+            kv: None,
             stop,
             ticker: Some(ticker),
         })
+    }
+
+    /// Bind every invocation to one application's storage capability.
+    pub fn with_store(timeout: Duration, store: Arc<KvStore>) -> Result<Self> {
+        let mut runtime = Self::new(timeout)?;
+        runtime.kv = Some(store);
+        Ok(runtime)
     }
 
     /// Compile, resolve imports, and validate the complete versioned guest contract.
     pub fn register(&mut self, bytes: &[u8]) -> Result<ModuleId> {
         let component = Component::new(&self.engine, bytes).context("compiling component")?;
         for (name, _) in component.component_type().imports(&self.engine) {
+            if name == "local:kv/store@0.1.0" {
+                continue;
+            }
             let interface = name.split('@').next().unwrap_or(name);
             ensure!(
                 name.split_once('@').is_some_and(|(_, version)| version
@@ -115,7 +199,7 @@ impl Runtime {
                     .is_some_and(
                         |patch| !patch.is_empty() && patch.bytes().all(|c| c.is_ascii_digit())
                     )),
-                "unsupported WASI import version: {name}"
+                "unsupported component import version: {name}; rebuild with wr build"
             );
             if !matches!(
                 interface,
@@ -139,6 +223,10 @@ impl Runtime {
         }
         let mut linker = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        local::kv::store::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+            &mut linker,
+            |state| state,
+        )?;
         // Rust imports this interface even without explicit timers. Replacing it
         // keeps timer waits from escaping the guest's epoch deadline in host code.
         linker.allow_shadowing(true);
@@ -197,6 +285,8 @@ impl Runtime {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
             started,
+            timeout: self.timeout,
+            kv: self.kv.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         let remaining = self

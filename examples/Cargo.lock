@@ -431,6 +431,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wr-function-counter"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "wr-function-echo"
 version = "0.1.0"
 dependencies = [

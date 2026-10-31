@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "properties": {
     "name": { "$ref": "#/definitions/identifier" },
+    "kv": { "type": "boolean", "default": false, "description": "Enable persistent application-scoped key/value storage." },
     "path-prefix": {
       "description": "Application mount path: / or literal unreserved segments, without trailing slash or dot segments.",
       "type": "string",

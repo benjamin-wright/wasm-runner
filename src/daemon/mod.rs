@@ -32,7 +32,10 @@ pub(crate) async fn serve(
         listen,
         ..Config::default()
     };
-    let applications = Applications::new(config.clone())?;
+    let storage = std::sync::Arc::new(crate::persistence::Storage::new(
+        fs::canonicalize(&paths.directory)?.join("kv"),
+    ));
+    let applications = Applications::with_storage(config.clone(), Some(storage.clone()))?;
     let (stop, stopped) = watch::channel(false);
     let (ready, address) = oneshot::channel();
     let mut host_stopped = stopped.clone();
@@ -97,5 +100,6 @@ pub(crate) async fn serve(
             outcome = result;
         }
     }
-    outcome
+    let synced = tokio::task::spawn_blocking(move || storage.sync()).await?;
+    outcome.and(synced)
 }

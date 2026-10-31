@@ -10,6 +10,8 @@ pub(crate) struct Deployment {
     pub name: String,
     #[serde(rename = "path-prefix")]
     pub path_prefix: String,
+    #[serde(default)]
+    pub kv: bool,
     pub handlers: Vec<Handler>,
 }
 
@@ -61,6 +63,8 @@ pub(crate) enum Reply {
         pid: u32,
         listen: std::net::SocketAddr,
         applications: Vec<ApplicationInfo>,
+        #[serde(default)]
+        storage: crate::persistence::StorageInfo,
     },
     Applications {
         applications: Vec<ApplicationInfo>,

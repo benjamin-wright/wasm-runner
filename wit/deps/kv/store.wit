@@ -1,0 +1,23 @@
+package local:kv@0.1.0;
+
+interface store {
+    variant value {
+        bytes(list<u8>),
+        text(string),
+        integer(s64),
+    }
+
+    enum kv-error {
+        disabled,
+        invalid-key,
+        value-too-large,
+        type-mismatch,
+        overflow,
+        storage,
+    }
+
+    get: func(key: string) -> result<option<value>, kv-error>;
+    set: func(key: string, entry: value) -> result<_, kv-error>;
+    delete: func(key: string) -> result<bool, kv-error>;
+    increment: func(key: string) -> result<s64, kv-error>;
+}

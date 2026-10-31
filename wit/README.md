@@ -49,7 +49,37 @@ manifest; see [manifest and discovery rules](../docs/reference.md#source-discove
 Build components separately, then serve them with `wr run`. Version 0.2.0 adds
 `path-params` and replaces the optional raw query with grouped decoded values;
 rebuild all older components. Incompatible interfaces fail server startup.
-The WIT world declares no host imports, but Rust's compilation target introduces
+The WIT world imports `local:kv/store@0.1.0`; Rust's compilation target introduces
 WASI imports. The [runtime policy](../docs/reference.md#runtime-and-wasi-policy)
 defines supported interfaces and permissions. Guest state is fresh for every
-invocation. Event handlers and SQL/KV host capabilities are not implemented.
+invocation. Previously built HTTP-only components remain compatible. Event
+handlers and SQL are not implemented.
+
+## Persistent application values
+
+Set `kv: true` in the application manifest. Setup exports the generated
+[KV interface](deps/kv/store.wit) as `crate::kv`:
+
+```rust
+use crate::kv::{self, Value};
+
+// Use these inside a handler, returning an appropriate HTTP response on error.
+fn example() -> Result<i64, kv::KvError> {
+    kv::set("greeting", &Value::Text("Hello".into()))?;
+    let _value: Option<Value> = kv::get("greeting")?;
+    kv::increment("visits")
+}
+```
+
+`Value` preserves bytes, UTF-8 text, or signed 64-bit integers. `delete` returns
+whether a value existed. Increment atomically adds one (a missing key becomes
+integer `1`); it rejects text/bytes and overflow without changing the value.
+All functions in the application share storage. A disabled application receives
+`KvError::Disabled` on every operation, even if it imports the interface.
+
+Use the generated enums directly. Guests cannot select another application's
+keyspace or a host path. Ordinary typed errors are for the handler to map to
+HTTP; see the [counter example](../examples/functions/counter.rs). A later
+trap or timeout does not undo writes, so retrying an increment can count twice.
+See [storage behavior](../docs/reference.md#persistent-application-kv) for limits,
+durability, ownership, and inspection.

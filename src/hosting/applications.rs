@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
+use crate::persistence::{Storage, StorageInfo};
 use anyhow::{Result, ensure};
 use rocket::local::asynchronous::Client;
 use serde::{Deserialize, Serialize};
@@ -16,11 +17,13 @@ pub(crate) struct Applications {
     current: RwLock<BTreeMap<String, Arc<Application>>>,
     config: Config,
     pub(super) state: Arc<State>,
+    storage: Option<Arc<Storage>>,
 }
 
 pub(super) struct Application {
     path_prefix: String,
     pub(super) client: Client,
+    kv: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -29,6 +32,8 @@ pub(crate) struct ApplicationInfo {
     pub name: String,
     pub path_prefix: String,
     pub functions: Vec<FunctionInfo>,
+    #[serde(default)]
+    pub kv: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,11 +45,16 @@ pub(crate) struct FunctionInfo {
 
 impl Applications {
     pub(crate) fn new(config: Config) -> Result<Arc<Self>> {
+        Self::with_storage(config, None)
+    }
+
+    pub(crate) fn with_storage(config: Config, storage: Option<Arc<Storage>>) -> Result<Arc<Self>> {
         let state = State::new(config.clone())?;
         Ok(Arc::new(Self {
             current: RwLock::new(BTreeMap::new()),
             config,
             state,
+            storage,
         }))
     }
 
@@ -84,9 +94,18 @@ impl Applications {
                     name: name.clone(),
                     path_prefix: application.path_prefix.clone(),
                     functions,
+                    kv: application.kv,
                 }
             })
             .collect()
+    }
+
+    pub(crate) async fn storage_info(&self) -> Result<StorageInfo> {
+        let storage = self.storage.clone();
+        Ok(tokio::task::spawn_blocking(move || {
+            storage.map(|storage| storage.inspect()).unwrap_or_default()
+        })
+        .await?)
     }
 
     pub(crate) fn stop(&self) {
@@ -99,6 +118,7 @@ impl Applications {
         name: String,
         path_prefix: String,
         handlers: Vec<Handler>,
+        kv: bool,
     ) -> Result<()> {
         ensure!(
             !self.state.stopping.load(Ordering::SeqCst),
@@ -106,12 +126,27 @@ impl Applications {
         );
         validate_prefix(&path_prefix)?;
         let timeout = self.config.execution_timeout;
-        let prepared =
-            tokio::task::spawn_blocking(move || routing::prepare(handlers, timeout)).await??;
+        let storage = self.storage.clone();
+        let identity = name.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let store = if kv {
+                Some(
+                    storage
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("KV storage is not configured"))?
+                        .application(&identity)?,
+                )
+            } else {
+                None
+            };
+            routing::prepare(handlers, timeout, store)
+        })
+        .await??;
         let client = routing::dispatcher(prepared, self.state.clone()).await?;
         let application = Arc::new(Application {
             path_prefix,
             client,
+            kv,
         });
         let mut current = self.current.write().expect("application registry");
         ensure!(

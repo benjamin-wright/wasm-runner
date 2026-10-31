@@ -1,4 +1,7 @@
-use std::{fmt::Write, future::Future, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap, fmt::Write, future::Future, net::SocketAddr, path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use rocket::{
@@ -32,7 +35,8 @@ async fn index(socket: &State<PathBuf>) -> (Status, RawHtml<String>) {
         Ok(Reply::Status {
             pid,
             listen,
-            mut applications,
+            applications,
+            storage,
         }) => {
             write!(
                 content,
@@ -42,44 +46,64 @@ async fn index(socket: &State<PathBuf>) -> (Status, RawHtml<String>) {
     <div><dt>Status</dt><dd>Running</dd></div>
     <div><dt>Process ID</dt><dd>{pid}</dd></div>
     <div><dt>Hosting address</dt><dd><code>http://{listen}</code></dd></div>
-  </dl>
-</section>
-<section id="applications">
-  <h2>Applications <span class="count">{}</span></h2>"#,
-                applications.len()
+  </dl>"#,
             )
             .unwrap();
-            applications.sort_by(|left, right| left.name.cmp(&right.name));
-            if applications.is_empty() {
+            render_database(&mut content, &storage);
+            content.push_str("</section>");
+
+            let mut owners = BTreeMap::new();
+            for application in &applications {
+                owners.insert(application.name.as_str(), (Some(application), None));
+            }
+            for store in &storage.keyspaces {
+                owners.entry(store.name.as_str()).or_insert((None, None)).1 = Some(store);
+            }
+            write!(content, "<section id=\"applications\"><h2>Applications <span class=\"count\">{}</span></h2>", owners.len()).unwrap();
+            if owners.is_empty() {
                 content.push_str("<p class=\"empty\">No deployed applications.</p>");
             } else {
                 content.push_str(
-                    r#"<table>
-  <caption class="visually-hidden">Deployed applications, path prefixes, and functions with application-relative routes</caption>
-  <thead><tr><th scope="col">Name</th><th scope="col">Path prefix</th><th scope="col" class="functions-column">Functions <span class="route-note">Application-relative routes</span></th></tr></thead>
-  <tbody>"#,
+                    r#"<div class="application-table"><table>
+  <caption class="visually-hidden">Applications, deployment status, routes, and keyspace file sizes</caption>
+  <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Path prefix</th><th scope="col" class="functions-column">Functions</th><th scope="col">Keyspace file bytes</th></tr></thead>"#,
                 );
-                for application in applications {
-                    write!(
-                        content,
-                        "<tr><th scope=\"row\">{}</th><td><code>{}</code></td><td><ul class=\"functions\">",
-                        escape(&application.name),
-                        escape(&application.path_prefix)
-                    )
-                    .unwrap();
-                    for function in application.functions {
+                for (name, (application, store)) in owners {
+                    let status = if application.is_some() {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    };
+                    write!(content, "<tbody data-application=\"{}\"><tr><th scope=\"row\">{}</th><td><span class=\"status {}\">{status}</span></td>", escape(name), escape(name), status.to_ascii_lowercase()).unwrap();
+                    if let Some(application) = application {
                         write!(
                             content,
-                            "<li><strong>{}</strong><span><code>{}</code> <code>{}</code></span></li>",
-                            escape(&function.name),
-                            escape(&function.method),
-                            escape(&function.path)
+                            "<td><code>{}</code></td><td><ul class=\"functions\">",
+                            escape(&application.path_prefix)
                         )
                         .unwrap();
+                        for function in &application.functions {
+                            write!(content, "<li><strong>{}</strong><span><code>{}</code> <code>{}</code></span></li>", escape(&function.name), escape(&function.method), escape(&function.path)).unwrap();
+                        }
+                        content.push_str("</ul></td>");
+                    } else {
+                        content.push_str("<td>—</td><td>—</td>");
                     }
-                    content.push_str("</ul></td></tr>");
+                    let file_bytes = if application.is_some_and(|application| !application.kv) {
+                        "—".to_owned()
+                    } else {
+                        store
+                            .and_then(|store| store.disk_bytes)
+                            .map(|bytes| bytes.to_string())
+                            .unwrap_or_else(|| "Unavailable".to_owned())
+                    };
+                    write!(
+                        content,
+                        "<td class=\"keyspace-bytes\">{file_bytes}</td></tr></tbody>"
+                    )
+                    .unwrap();
                 }
-                content.push_str("</tbody></table>");
+                content.push_str("</table></div>");
             }
             content.push_str("</section>");
             Status::Ok
@@ -94,7 +118,7 @@ async fn index(socket: &State<PathBuf>) -> (Status, RawHtml<String>) {
                 r#"<section class="error" role="alert">
   <h2>Daemon metadata unavailable</h2>
   <p>{}</p>
-  <p>Check that the selected daemon is running, then refresh this page.</p>
+  <p>Check that the selected daemon is running.</p>
 </section>"#,
                 escape(&message)
             )
@@ -106,6 +130,21 @@ async fn index(socket: &State<PathBuf>) -> (Status, RawHtml<String>) {
         status,
         RawHtml(PAGE_TEMPLATE.replace("<!-- content -->", &content)),
     )
+}
+
+fn render_database(content: &mut String, storage: &crate::persistence::StorageInfo) {
+    content.push_str("<h3>KV storage</h3>");
+    if !storage.opened {
+        content.push_str("<p class=\"empty\">Not initialized.</p>");
+        return;
+    }
+    let number = |value: Option<u64>| {
+        value
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "Unavailable".into())
+    };
+    write!(content, "<dl><div><dt>Database disk bytes</dt><dd>{}</dd></div><div><dt>Journal fragments</dt><dd>{}</dd></div><div><dt>Storage errors</dt><dd>{}</dd></div></dl>",
+        number(storage.disk_bytes), number(storage.journal_count.map(|n| n as u64)), storage.storage_errors).unwrap();
 }
 
 #[rocket::get("/style.css")]

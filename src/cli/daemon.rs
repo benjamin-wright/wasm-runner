@@ -77,6 +77,7 @@ impl Daemon {
                         pid,
                         listen,
                         applications,
+                        storage,
                     } = client::request(&paths.socket, Request::Status)?
                     {
                         println!(
@@ -86,6 +87,10 @@ impl Daemon {
                         for application in applications {
                             println!("{}\t{}", application.name, application.path_prefix);
                         }
+                        println!(
+                            "KV storage (entry counts are estimates; disk usage includes shared engine data): {}",
+                            serde_json::to_string(&storage)?
+                        );
                     }
                 }
                 Command::Stop => {

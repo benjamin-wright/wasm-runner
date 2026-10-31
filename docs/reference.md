@@ -37,7 +37,8 @@ Arguments after `wr` go directly to the application.
 ## Manifest
 
 An application has a name, a required `path-prefix`, and a nonempty map of named
-functions. Every configured function declares an HTTP method/path pair. See the complete
+functions. Optional `kv: true` enables [persistent application storage](#persistent-application-kv);
+it defaults to false. Every configured function declares an HTTP method/path pair. See the complete
 [example manifest](../examples/application.yaml). Application and function names
 are lowercase identifiers of 1 to 64 letters, digits, or hyphens, starting with
 a letter.
@@ -173,7 +174,7 @@ All paths below are relative to the application directory.
 | `Cargo.toml` | Generated guest workspace root; protected against overwriting a handwritten manifest. |
 | `.wr/functions/<name>/Cargo.toml` | Generated `cdylib` package for each discovered source. |
 | `.wr/functions/<name>/lib.rs` | Generated entry point that includes the original source and exports the guest handler. |
-| `.wr/wit/world.wit` | Copy of the embedded guest contract. |
+| `.wr/wit/world.wit`, `.wr/wit/deps/kv/store.wit` | Embedded HTTP and KV guest contracts. |
 | `.gitignore` | Existing contents preserved; required literal entries appended if missing. |
 | `.vscode/settings.json` | Existing settings merged with the source include path. |
 | `Cargo.lock` | Managed by Cargo during update or explicitly unlocked builds, not by setup; keep it in version control. |
@@ -193,7 +194,7 @@ dependencies appear only in that function's package. The
 ### Ignore rules and editor settings
 
 Setup preserves `.gitignore` and appends missing literal lines from `.wr/`,
-`/Cargo.toml`, and `/target/`, adding a separating newline if necessary.
+`/Cargo.toml`, `/target/`, and `/.wr-data/`, adding a separating newline if necessary.
 Existing patterns, including negations, are not interpreted or reordered.
 Repeated setup does not duplicate these entries. No ignore rule is added for
 `Cargo.lock`.
@@ -254,8 +255,8 @@ a compilation failure.
 
 These are components exporting the [custom HTTP guest interface](../wit/README.md),
 not WASI HTTP. The target may introduce WASI imports. Build does not execute
-components, serve HTTP, provide host capability policy or SQL/KV support, or
-implement event handlers.
+components or serve HTTP. KV capability enforcement belongs to the runtime.
+SQL and non-HTTP event handlers are unsupported.
 
 ## Update
 
@@ -377,15 +378,116 @@ arguments, preopened directories, or network access is inherited. Stdin is
 closed; stdout and stderr are sinks; no terminals are available. Monotonic clock
 reads report time since invocation; timer subscriptions trap because native
 WASI waits cannot be interrupted by guest epochs. Filesystem, random, socket,
-wall-clock, and custom host interfaces are not supported in this increment.
+wall-clock, and custom host interfaces other than the versioned KV import are unsupported.
 Unsupported imports and incompatible guest interfaces fail registration.
 The [guest contract](../wit/README.md#execution-and-compatibility) defines interface
 versioning and rebuild requirements.
 
 Epoch interruption cannot forcibly terminate arbitrary host code or undo
 external effects. Any future host I/O must honor the remaining execution
-deadline. Memory quotas, streaming, hot reload, SQL/KV bindings, and custom
+deadline. Memory quotas, streaming, hot reload, SQL bindings, and custom
 scheduling are outside this increment.
+
+## Persistent application KV
+
+Top-level `kv` is an optional boolean, default `false`. An enabled application's
+functions share the keyspace named by its validated manifest `name`. Guests
+receive only that capability, never a database path or a keyspace selector.
+The versioned [KV WIT](../wit/deps/kv/store.wit) is exported to Rust handlers as
+`crate::kv`; the HTTP export remains `local:http/handler@0.2.0`. Previously built
+HTTP-only components continue to work. Upgrade the CLI and daemon together:
+older daemons reject deployment messages containing the new capability flag.
+
+### Operations and errors
+
+`get` returns an optional typed value; empty bytes/text differ from absence.
+`set` replaces both value and type. `delete` atomically returns whether a value
+was removed. `increment` atomically adds one to a signed 64-bit integer and
+returns that operation's committed result; a missing key becomes integer `1`.
+Text or bytes produce `type-mismatch` and the maximum integer produces
+`overflow`; neither changes the value. No implicit coercion, wrapping, or
+saturation occurs. Get followed by set is not an atomic counter update.
+
+Keys are case-sensitive UTF-8, 1–1,024 encoded bytes, without normalization.
+Bytes and text allow 0–1,048,576 payload bytes, excluding the internal type tag.
+Integers allow the full signed 64-bit range. Typed errors are `disabled`,
+`invalid-key`, `value-too-large`, `type-mismatch`, `overflow`, and `storage`.
+Errors contain no paths, keys, or values. The guest chooses their HTTP mapping.
+The capability is checked before every operation, including invalid arguments.
+
+### Storage ownership and preservation
+
+| Host | Database directory | Keyspace |
+| --- | --- | --- |
+| Daemon | `<state-dir>/kv/` | Manifest name |
+| `wr run` | `<application-directory>/.wr-data/kv/` | Manifest name |
+| `server::serve_with_storage` | Explicit root argument | `application` |
+
+The database opens lazily when preparing the first enabled application, before
+route publication. Setup, build, update, previews, and disabled generations do
+not open it. Managed paths reject symlinks and special files; Unix database
+directories must be private (0700). Concurrent ownership is rejected, including
+when capabilities remain alive after their owner is dropped. Storage errors
+fail preparation and leave published routes unchanged. A failed preparation
+may leave a new database or empty keyspace; it never clears existing values.
+
+Changing routes, prefixes, components, or deployment source location preserves
+the keyspace. Renaming selects another keyspace and retains the old one.
+Removal and disabling retain data and handles. Old in-flight generations may
+still write. Clean preserves `.wr-data/` and does not touch daemon data. There
+is no reset/delete-database command, multi-process sharing, or automatic data
+deletion. For offline backup, stop the owner and copy the entire database
+directory. Deployments themselves still start empty after daemon restart.
+
+### Durability and deadlines
+
+Fjall uses default OS-buffer persistence, without a durable sync per mutation.
+Successful writes are intended to survive a process crash under a healthy OS;
+they are not guaranteed against OS crash or power loss. There is no bounded
+loss window or runner-managed periodic sync. Graceful shutdown closes
+admission, drains preparation and executions, explicitly syncs the shared
+database with `SyncAll`, and reports failures before releasing ownership.
+
+Accepted writes survive a later guest trap, timeout, invalid HTTP response, or
+disconnect. A failed or unacknowledged call can have an unknown outcome;
+retrying increment can increment twice. Calls are never automatically replayed.
+Database calls can wait for I/O, locks, or maintenance. Runtime deadline checks
+run before and after each call, but cannot interrupt native I/O. The execution
+slot remains held until the call returns; timeout does not roll back mutations.
+
+`runtime::Runtime::new` and `server::serve` remain storage-disabled.
+`runtime::Runtime::with_store(timeout, Arc<KvStore>)` accepts an application
+capability. Embedders obtain it from `persistence::Storage::application(name)`;
+creating `Storage::new(root)` does no I/O. Drain all users, call `Storage::sync`,
+and release capabilities before opening the same root again. The storage-enabled
+server sibling accepts `(config, handlers, root, shutdown, on_ready)` and owns
+this sync boundary.
+
+### Inspection and alpha limits
+
+`Storage::inspect` and daemon status expose retained
+keyspaces, operation counts/failures, total and maximum elapsed microseconds,
+estimated entry counts, database disk bytes, journal count, and storage errors.
+The storage API and daemon status also expose explicit sync count, failures,
+last duration, and result for the current host lifetime. These reset on restart;
+they do not describe the previous daemon's shutdown. Actual shutdown outcomes and durations
+are recorded in the daemon log. Foreground hosts log metadata every 30 seconds
+and sync outcomes at shutdown. All counters reset on restart.
+Existing keyspaces are discovered when the
+database first opens after restart; inspection alone does not open storage.
+
+Estimated entry counts may diverge substantially after updates/deletes.
+Keyspace disk bytes measure its on-disk storage, excluding shared journals and
+caches. A keyspace can report zero while writes are still buffered and recorded
+in the shared journal. Database disk bytes include shared engine storage and
+journal preallocation; they do not measure live payload size or necessarily
+physical filesystem allocation. Shared journals, caches, I/O, and health are not
+attributable to one application. There are no independent performance/failure
+domains or runner-enforced application quotas. Engine buffering and backpressure
+remain enabled. No scans or mirror maps are used for exact live-size metrics.
+
+SQL, scans, TTL, compare-and-set, guest transactions, named stores, remote
+backends, replication, online backup, and a data browser are outside this API.
 
 ## Output and errors
 
@@ -415,9 +517,20 @@ showing the daemon PID, hosting address, and application names and path prefixes
 sorted by name. Each application includes its deployed functions sorted by name,
 with their HTTP methods and application-relative route paths (before the
 application's path prefix is applied). Dynamic captures are displayed literally.
+The Daemon section includes database-wide KV statistics. Each application's
+row groups its routes and a Keyspace file bytes column, which shows file size
+for KV-enabled applications and a dash for deployed applications with KV off.
+Other per-keyspace metrics are not displayed in the admin UI.
+Names present only in retained
+keyspaces also appear with their retained file size, marked Disabled with no active prefix or functions.
+Deployed applications are marked Enabled, independently of their KV capability.
+The application count includes both groups, each name appearing once.
+Metric definitions are in [KV inspection](#inspection-and-alpha-limits).
 Only deployed functions appear; source files without configured routes are not
-deployed. An empty registry is shown explicitly. The Refresh link or a
-browser refresh queries again; there is no automatic polling. `GET /style.css`
+deployed. An empty registry is shown explicitly. The browser reloads the page
+five seconds after each load using HTML timed refresh, querying current metadata
+without a Refresh button. Error pages use the same automatic refresh, allowing
+recovery after a daemon restart. This refresh reloads the whole page. `GET /style.css`
 serves the bundled stylesheet. Rocket supplies HEAD fallback. No browser
 JavaScript, external assets, application source directories, or local build
 outputs are required.
@@ -479,7 +592,7 @@ and SIGTERM use the same shutdown path. Stopping an absent daemon fails.
 `deploy` loads the manifest and configured sources using the usual validation,
 then reads existing component files. It neither runs Cargo nor generates files.
 The control payload contains the manifest's application name, required
-`path-prefix`, named method/path routes, and component bytes; source paths and
+`path-prefix`, the optional boolean `kv` flag (absent means false), named method/path routes, and component bytes; source paths and
 build dependencies are not sent.
 The server independently validates names, methods, route syntax, component
 compatibility, internal route collisions, and prefix ownership. Application and
@@ -504,15 +617,15 @@ Deleting local build outputs does not affect deployed component bytes.
 The control transport uses one request and response per Unix connection. Each
 message is a four-byte big-endian byte length followed by UTF-8 JSON, capped at
 128 MiB including JSON encoding. The request's `command` is `deploy`, `remove`,
-`list`, `status`, or `stop`. Deploy includes `application: {name, path-prefix, handlers}`, where
+`list`, `status`, or `stop`. Deploy includes `application: {name, path-prefix, kv, handlers}`, where
 each handler contains `name`, `method`, `path`, and `component` (an array of byte
 values). Remove includes `name`. Responses use `result: ok`, `applications`
-(with `applications`), `status` (with `pid`, `listen`, and `applications`), or `error`
+(with `applications`), `status` (with `pid`, `listen`, `applications`, and `storage`), or `error`
 (with `message`). Both application lists contain objects with `name`,
-`path-prefix`, and `functions` fields. `functions` is sorted by name and contains
+`path-prefix`, `kv`, and `functions` fields. `functions` is sorted by name and contains
 objects with `name`, `method`, and application-relative `path` from the active
 routes. Component bytes are not included in these metadata responses. CLI list
-and status output continue to display only application names and prefixes.
+displays application names and prefixes; status also displays storage metadata.
 Four control requests may run concurrently; excess connections
 are closed. Client reads time out after 120 seconds; a timeout does not cancel a
 server-side deployment. The control socket is local administration, not a remote

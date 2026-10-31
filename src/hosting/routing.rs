@@ -6,8 +6,15 @@ use rocket::{Route, http::uri::Origin, local::asynchronous::Client};
 use super::server::{Handler, RegisteredHandler, State};
 use crate::runtime::Runtime;
 
-pub(super) fn prepare(handlers: Vec<Handler>, timeout: std::time::Duration) -> Result<Vec<Route>> {
-    let mut runtime = Runtime::new(timeout)?;
+pub(super) fn prepare(
+    handlers: Vec<Handler>,
+    timeout: std::time::Duration,
+    store: Option<Arc<crate::persistence::KvStore>>,
+) -> Result<Vec<Route>> {
+    let mut runtime = match store {
+        Some(store) => Runtime::with_store(timeout, store)?,
+        None => Runtime::new(timeout)?,
+    };
     let mut prepared = Vec::new();
     for handler in handlers {
         Origin::parse_route(&handler.path).map_err(|error| {

@@ -1,7 +1,13 @@
 name: hello
 path-prefix: /demo
+kv: true
 
 functions:
+  counter:
+    http:
+      method: GET
+      path: /counter
+
   greet:
     http:
       method: GET

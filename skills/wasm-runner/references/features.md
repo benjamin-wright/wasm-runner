@@ -70,15 +70,19 @@ starting if it requires unsupported capabilities.
 
 ## Application capabilities and limits
 
-Each request starts with fresh handler state. Do not use globals as persistent
-application storage. Handlers cannot access host environment variables, command
-arguments, files, or the network. Printing from a handler does not produce
-application logs.
+Each request starts with fresh handler state. Globals do not persist between
+requests. Persistent values require the explicit KV capability. Handlers cannot
+access host environment variables, command arguments, files, or the network.
+Printing from a handler does not produce application logs.
 
-Randomness, wall-clock time, and sleeping on timers are unsupported. SQL/KV
-services and non-HTTP events are not implemented. Neither streaming nor hot
-reload is provided. Do not propose outbound HTTP, local file storage, environment-based secrets, or
-database clients as working handler capabilities. Surface the missing capability
+Randomness, wall-clock time, and sleeping on timers are unsupported. SQL services
+and non-HTTP events are not implemented. Set top-level `kv: true`
+to use generated `crate::kv::{get, set, delete, increment}`. Values are typed
+bytes, text, or signed 64-bit integers. Application names bind persistent
+keyspaces; accepted writes survive later guest failures. Increment is atomic.
+Neither streaming nor hot reload is provided. Do not propose outbound HTTP,
+direct file access, environment-based secrets, or database clients as working
+handler capabilities. Surface the missing capability
 when a requested application depends on one.
 
 CLI defaults are 5 seconds per execution, 16 concurrent executions, a 1 MiB

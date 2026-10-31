@@ -2,7 +2,7 @@
 name = "wasm-runner"
 version = "0.1.0"
 edition = "2024"
-description = "Build, deploy, host, and inspect WebAssembly HTTP applications"
+description = "Build, deploy, host, and inspect WebAssembly HTTP applications with persistent KV storage"
 publish = false
 
 [[bin]]
@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 form_urlencoded = "1.2"
+fjall = "3.1"
 http = "0.2"
 jsonc-parser = { version = "0.34", features = ["cst"] }
 jsonschema = { version = "0.60", default-features = false }

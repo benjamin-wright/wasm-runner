@@ -64,6 +64,11 @@ Handlers import `Request` and `Response` from `crate`; `wr` supplies the HTTP
 server. Return expected application errors as `Response` values. Configure
 dependencies in the YAML manifest rather than generated Cargo files.
 
+For persistent values, set top-level `kv: true` and use generated `crate::kv`
+bindings for typed get/set, delete, and atomic integer increment. Storage is
+shared by all functions of the same application identity and survives removal
+and cleanup. See [Application features](references/features.md#application-capabilities-and-limits).
+
 ## Preview, build, and serve
 
 Run these commands from the application's parent directory, or use an absolute

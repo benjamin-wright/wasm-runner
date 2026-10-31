@@ -12,6 +12,366 @@ const GREET_FUNCTION: &str = include_str!("../examples/functions/greet.rs");
 const ECHO_FUNCTION: &str = include_str!("../examples/functions/echo.rs");
 const INSPECT_FUNCTION: &str = include_str!("../examples/functions/inspect.rs");
 const HTTP_WORLD: &str = include_str!("../wit/world.wit");
+const HTTP_ONLY_WORLD: &str = include_str!("fixtures/http-only.wit");
+const KV_FUNCTION: &str = include_str!("fixtures/kv.rs");
+
+fn guest_request(path: &str) -> wasm_runner::runtime::Request {
+    wasm_runner::runtime::Request {
+        method: "GET".into(),
+        path: path.into(),
+        path_params: vec![],
+        query: vec![],
+        headers: vec![],
+        body: vec![],
+    }
+}
+
+fn exercise_kv(directory: &std::path::Path) {
+    use std::{sync::Arc, time::Duration};
+    use wasm_runner::{
+        persistence::{KvValue, Storage},
+        runtime::{ExecutionError, Runtime},
+    };
+    let component = fs::read(directory.join(".wr/components/kv-test.wasm")).unwrap();
+    let mut disabled = Runtime::new(Duration::from_secs(2)).unwrap();
+    let id = disabled.register(&component).unwrap();
+    assert_eq!(
+        disabled
+            .execute(&id, &guest_request("/disabled"))
+            .unwrap()
+            .body,
+        b"disabled"
+    );
+    assert!(!directory.join(".wr-data").exists());
+    let root = fs::canonicalize(directory).unwrap().join(".wr-data/kv");
+    let storage = Storage::new(&root);
+    let store = storage.application("hello").unwrap();
+    let mut runtime = Runtime::with_store(Duration::from_secs(2), store.clone()).unwrap();
+    let id = runtime.register(&component).unwrap();
+    assert_eq!(
+        runtime.execute(&id, &guest_request("/check")).unwrap().body,
+        b"ok"
+    );
+    assert!(matches!(
+        runtime.execute(&id, &guest_request("/trap")),
+        Err(ExecutionError::Guest(_))
+    ));
+    assert_eq!(store.get("trap").unwrap(), Some(KvValue::Integer(1)));
+    let mut short = Runtime::with_store(Duration::from_millis(100), store.clone()).unwrap();
+    let short_id = short.register(&component).unwrap();
+    assert!(matches!(
+        short.execute(&short_id, &guest_request("/timeout")),
+        Err(ExecutionError::Timeout)
+    ));
+    assert_eq!(store.get("timeout").unwrap(), Some(KvValue::Integer(1)));
+    // Both old and replacement runtimes retain the same capability.
+    let mut replacement = Runtime::with_store(
+        Duration::from_secs(2),
+        storage.application("hello").unwrap(),
+    )
+    .unwrap();
+    let replacement_id = replacement.register(&component).unwrap();
+    let runtime = Arc::new(runtime);
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let runtime = runtime.clone();
+            let id = id.clone();
+            std::thread::spawn(move || {
+                String::from_utf8(runtime.execute(&id, &guest_request("/")).unwrap().body)
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+            })
+        })
+        .collect();
+    let mut counts: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    counts.sort_unstable();
+    assert_eq!(counts, (1..=8).collect::<Vec<_>>());
+    assert_eq!(
+        replacement
+            .execute(&replacement_id, &guest_request("/"))
+            .unwrap()
+            .body,
+        b"9"
+    );
+    storage.sync().unwrap();
+    drop((runtime, replacement, short, store, storage));
+    let storage = Storage::new(&root);
+    assert_eq!(
+        storage.application("hello").unwrap().get("count").unwrap(),
+        Some(KvValue::Integer(9))
+    );
+    drop(storage);
+    #[cfg(unix)]
+    exercise_kv_daemon(&component);
+
+    // Compile the frozen pre-KV world, then register the resulting real component.
+    let world = directory.join(".wr/wit/world.wit");
+    let entry = directory.join(".wr/functions/greet/lib.rs");
+    let original = fs::read_to_string(&entry).unwrap();
+    fs::write(&world, HTTP_ONLY_WORLD).unwrap();
+    fs::write(
+        &entry,
+        original.replace("pub use local::kv::store as kv;\n", ""),
+    )
+    .unwrap();
+    let output = Command::new("cargo")
+        .current_dir(directory)
+        .args([
+            "build",
+            "--locked",
+            "--target",
+            "wasm32-wasip2",
+            "-p",
+            "wr-function-greet",
+        ])
+        .env("CARGO_TARGET_DIR", directory.join("target"))
+        .output()
+        .unwrap();
+    fs::write(world, HTTP_WORLD).unwrap();
+    fs::write(entry, original).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let old =
+        fs::read(directory.join("target/wasm32-wasip2/debug/wr_function_greet.wasm")).unwrap();
+    let id = disabled.register(&old).unwrap();
+    assert_eq!(
+        disabled.execute(&id, &guest_request("/")).unwrap().body,
+        b"Hello, world!"
+    );
+}
+
+#[cfg(unix)]
+fn exercise_kv_daemon(component: &[u8]) {
+    let source = "name: first\npath-prefix: /one\nkv: true\nfunctions:\n  counter:\n    http:\n      method: GET\n      path: /<path..>\n";
+    let first = ManifestFixture::new(source);
+    let second = ManifestFixture::new(&source.replace("first", "second").replace("/one", "/two"));
+    for fixture in [&first, &second] {
+        let components = fixture.directory.join(".wr/components");
+        fs::create_dir_all(&components).unwrap();
+        fs::write(components.join("counter.wasm"), component).unwrap();
+    }
+    let daemon = DaemonFixture::new();
+    let mut address = daemon.start();
+    assert!(!daemon.directory.join("d/kv").exists());
+    {
+        use std::io::{Read, Write};
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(daemon.directory.join("d/control.sock"))
+                .unwrap();
+        let body = br#"{"command":"deploy","application":{"name":"invalid","path-prefix":"/invalid","kv":"true","handlers":[]}}"#;
+        stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .unwrap();
+        stream.write_all(body).unwrap();
+        let mut size = [0; 4];
+        stream.read_exact(&mut size).unwrap();
+        let mut reply = vec![0; u32::from_be_bytes(size) as usize];
+        stream.read_exact(&mut reply).unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(reply["result"], "error");
+    }
+    fs::write(&first.path, source.replace("kv: true", "kv: false")).unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
+    assert!(!daemon.directory.join("d/kv").exists());
+    let locked = wasm_runner::persistence::Storage::new(
+        fs::canonicalize(daemon.directory.join("d"))
+            .unwrap()
+            .join("kv"),
+    );
+    locked.application("first").unwrap();
+    fs::write(&first.path, source).unwrap();
+    assert!(
+        !daemon
+            .call(&["deploy", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
+    locked.sync().unwrap();
+    drop(locked);
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    daemon.success(&["deploy", second.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/one/").ends_with("1"));
+    assert!(http(&address, "GET", "/two/").ends_with("1"));
+    assert!(http(&address, "GET", "/one/").ends_with("2"));
+    fs::write(&first.path, source.replace("/one", "/moved")).unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/moved/").ends_with("3"));
+    daemon.success(&["remove", "first"]);
+    let status = daemon.success(&["daemon", "status"]);
+    assert!(status.contains("\"name\":\"first\""));
+    assert!(status.contains("estimated_entries"));
+    assert!(status.contains("max_micros"));
+    let admin = AdminFixture::start(&daemon.directory.join("d"));
+    let page = admin.page();
+    let daemon_section = page
+        .split("id=\"daemon\"")
+        .nth(1)
+        .unwrap()
+        .split("</section>")
+        .next()
+        .unwrap();
+    assert!(daemon_section.contains("Database disk bytes"));
+    assert!(daemon_section.contains("Journal fragments"));
+    assert!(!daemon_section.contains("Keyspace file bytes"));
+    assert!(page.contains("<th scope=\"col\">Keyspace file bytes</th>"));
+    assert!(!page.contains("Estimated entries"));
+    assert!(!page.contains("KV metrics"));
+    assert!(!page.contains(">increment</th>"));
+    assert!(!page.contains("Maximum μs"));
+    assert!(!page.contains("Entry counts are estimates"));
+    assert!(!page.contains("excludes shared journals"));
+    assert_eq!(page.matches("data-application=\"first\"").count(), 1);
+    let first_metrics = admin_application(&page, "first");
+    assert!(first_metrics.contains(">Disabled</span>"));
+    assert!(first_metrics.contains("<td class=\"keyspace-bytes\">0</td>"));
+    assert!(!first_metrics.contains("/moved"));
+    let second_metrics = admin_application(&page, "second");
+    assert!(second_metrics.contains(">Enabled</span>"));
+    assert!(second_metrics.contains("<td class=\"keyspace-bytes\">0</td>"));
+    assert!(second_metrics.contains("/two</code>"));
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/moved/").ends_with("4"));
+    let page = admin.page();
+    assert_eq!(page.matches("data-application=\"first\"").count(), 1);
+    let first_metrics = admin_application(&page, "first");
+    assert!(first_metrics.contains(">Enabled</span>"));
+    assert!(first_metrics.contains("/moved</code>"));
+    assert!(first_metrics.contains("<td class=\"keyspace-bytes\">0</td>"));
+    fs::write(
+        &first.path,
+        source
+            .replace("/one", "/moved")
+            .replace("kv: true", "kv: false"),
+    )
+    .unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/moved/disabled").ends_with("disabled"));
+    let page = admin.page();
+    assert!(admin_application(&page, "first").contains(">Enabled</span>"));
+    assert!(admin_application(&page, "first").contains("<td class=\"keyspace-bytes\">—</td>"));
+    fs::write(&first.path, source.replace("/one", "/moved")).unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/moved/").ends_with("5"));
+    daemon.success(&["daemon", "stop"]);
+    let log = fs::read_to_string(daemon.directory.join("d/daemon.log")).unwrap();
+    assert!(log.contains("shared application database: durable sync succeeded in"));
+    address = daemon.start();
+    assert!(daemon.success(&["apps", "list"]).is_empty());
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/moved/").ends_with("6"));
+    let status = daemon.success(&["daemon", "status"]);
+    assert!(status.contains("\"name\":\"second\""));
+    let page = admin.page();
+    assert!(admin_application(&page, "second").contains(">Disabled</span>"));
+    assert!(!page.contains("Durable sync:"));
+    assert!(!page.contains("Not yet requested"));
+    // A process crash preserves OS-buffered accepted mutations on a healthy OS.
+    let pid = status
+        .split("PID ")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    for _ in 0..100 {
+        if !daemon.call(&["daemon", "status"]).status.success() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    address = daemon.start();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/moved/").ends_with("7"));
+    daemon.success(&["daemon", "stop"]);
+    // Cleanup preserves foreground data and never manages daemon storage.
+    assert_eq!(foreground_counter(&first), "1");
+    assert_eq!(foreground_counter(&first), "2");
+    let preserved = first.directory.join(".wr-data/keep");
+    fs::create_dir_all(preserved.parent().unwrap()).unwrap();
+    fs::write(&preserved, "data").unwrap();
+    assert!(
+        wr(&["clean", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read_to_string(preserved).unwrap(), "data");
+}
+
+#[cfg(unix)]
+fn admin_application<'a>(page: &'a str, name: &str) -> &'a str {
+    page.split_once(&format!("data-application=\"{name}\""))
+        .expect("application displayed")
+        .1
+        .split("</tbody>")
+        .next()
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn foreground_counter(application: &ManifestFixture) -> String {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Child, Stdio},
+        time::Duration,
+    };
+    struct Running(Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut running = Running(
+        Command::new(env!("CARGO_BIN_EXE_wr"))
+            .arg("run")
+            .arg(&application.directory)
+            .args(["--listen", "127.0.0.1:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = running.0.stdout.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(address) = line.strip_prefix("Listening on http://") {
+                let _ = send.send(address.to_owned());
+            }
+        }
+    });
+    let address = receive
+        .recv_timeout(Duration::from_secs(30))
+        .expect("foreground KV readiness");
+    let response = http(&address, "GET", "/moved/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &running.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(running.0.wait().unwrap().success());
+    reader.join().unwrap();
+    response.split("\r\n\r\n").nth(1).unwrap().to_owned()
+}
 
 struct ManifestFixture {
     directory: PathBuf,
@@ -192,7 +552,7 @@ fn setup_preserves_existing_ignore_rules_and_appends_only_missing_entries() {
     let fixture = ManifestFixture::new(SETUP_APPLICATION);
     let path = fixture.directory.join(".gitignore");
     let existing = "# Local files\r\n.env\r\n/target/";
-    let expected = "# Local files\r\n.env\r\n/target/\n.wr/\n/Cargo.toml\n";
+    let expected = "# Local files\r\n.env\r\n/target/\n.wr/\n/Cargo.toml\n/.wr-data/\n";
     fs::write(&path, existing).unwrap();
 
     let output = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
@@ -602,6 +962,8 @@ fn schema_accepts_identifier_boundaries_and_literal_paths() {
 #[test]
 fn invalid_manifests_fail_before_printing_metadata() {
     let cases = [
+        (format!("{EXAMPLE}\nkv: 'true'\n"), &["/kv"][..]),
+        (format!("{EXAMPLE}\nkv: 1\n"), &["/kv"][..]),
         (
             EXAMPLE.replace("name: hello", "name: Invalid"),
             &["/name", "invalid"][..],
@@ -792,6 +1154,7 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
         GREET_FUNCTION,
     )
     .unwrap();
+    fs::write(fixture.directory.join("functions/kv-test.rs"), KV_FUNCTION).unwrap();
 
     let output = fixture.build(&[]);
     assert_eq!(output.status.code(), Some(1));
@@ -874,6 +1237,7 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
     serve_built_examples(&fixture.directory);
     #[cfg(unix)]
     deploy_built_examples(&fixture.directory);
+    exercise_kv(&fixture.directory);
 
     let destination = fixture.directory.join(".wr/components/greet.wasm");
     let previous = fs::read(&destination).unwrap();
@@ -1268,6 +1632,9 @@ fn admin_ui_reports_live_status_and_recovers() {
         .unwrap();
     assert!(page.contains(&format!("<dd>{pid}</dd>")));
     assert!(!page.contains("<script"));
+    assert!(page.contains("<meta http-equiv=\"refresh\" content=\"5\">"));
+    assert!(!page.contains("class=\"refresh\""));
+    assert!(!page.contains("Live metadata from your selected daemon."));
     let styles = http(&admin.address, "GET", "/style.css");
     assert!(styles.starts_with("HTTP/1.1 200"));
     assert!(styles.to_lowercase().contains("content-type: text/css"));
@@ -1277,6 +1644,7 @@ fn admin_ui_reports_live_status_and_recovers() {
     let page = admin.page();
     assert!(page.starts_with("HTTP/1.1 503"));
     assert!(!page.contains("<dd>Running</dd>"));
+    assert!(page.contains("<meta http-equiv=\"refresh\" content=\"5\">"));
     let address = daemon.start();
     assert!(admin.page().contains(&format!("http://{address}")));
     admin.stop("-INT");

@@ -74,6 +74,7 @@ async fn connection(
                         application.name,
                         application.path_prefix,
                         application.handlers,
+                        application.kv,
                     )
                     .await?;
                 Ok(Reply::Ok)
@@ -89,6 +90,7 @@ async fn connection(
                 pid: std::process::id(),
                 listen,
                 applications: applications.list(),
+                storage: applications.storage_info().await?,
             }),
             Request::Stop => {
                 applications.stop();

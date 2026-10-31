@@ -10,10 +10,6 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 h1 { font-size: 2rem; letter-spacing: -.04em; margin: 0; }
 h2 { font-size: 1.125rem; margin: 0 0 24px; }
 .eyebrow { font-size: .75rem; letter-spacing: .12em; font-weight: 700; color: #536474; margin: 0 0 8px; }
-.intro, footer { color: #536474; }
-.intro { margin: 24px 0; }
-.refresh { border: 1px solid #63788c; border-radius: 6px; padding: 8px 16px; color: inherit; text-decoration: none; font-weight: 600; }
-.refresh:hover { background: #e4ebf1; }
 a:focus-visible { outline: 3px solid #2776b8; outline-offset: 4px; }
 section { background: #fff; border: 1px solid #d7dfe6; border-radius: 10px; padding: 24px; margin: 20px 0; }
 dl { display: grid; grid-template-columns: 1fr 1fr 2fr; gap: 20px; margin: 0; }
@@ -23,7 +19,13 @@ code { font-size: .9em; overflow-wrap: anywhere; }
 .count { font-size: .875rem; color: #536474; margin-left: 8px; }
 table { width: 100%; border-collapse: collapse; text-align: left; table-layout: fixed; }
 th, td { padding: 12px 8px; overflow-wrap: anywhere; border-bottom: 1px solid #d7dfe6; vertical-align: top; }
-.functions-column { width: 50%; }
+.functions-column { width: 35%; }
+.application-table { overflow-x: auto; }
+.application-table > table { min-width: 640px; }
+.application-table > table > tbody + tbody { border-top: 2px solid #d7dfe6; }
+.keyspace-bytes { font-variant-numeric: tabular-nums; }
+.status { font-size: .8rem; font-weight: 600; }
+.status.disabled { color: #536474; }
 .route-note { display: block; font-weight: 400; text-transform: none; letter-spacing: normal; }
 .functions { list-style: none; padding: 0; margin: 0; }
 .functions li + li { margin-top: 12px; }
@@ -43,8 +45,9 @@ footer { font-size: .8rem; margin-top: 28px; }
 @media (prefers-color-scheme: dark) {
   :root { color: #e2e9f0; background: #141d26; }
   section { background: #1c2834; border-color: #3b4a58; }
-  .eyebrow, .intro, footer, dt, .count, .empty, thead th { color: #aab9c7; }
+  .eyebrow, footer, dt, .count, .empty, thead th { color: #aab9c7; }
   th, td { border-color: #3b4a58; }
-  .refresh:hover { background: #304255; }
+  .application-table > table > tbody + tbody { border-color: #3b4a58; }
+  .status.disabled { color: #aab9c7; }
   .error { border-left-color: #e48a64; }
 }

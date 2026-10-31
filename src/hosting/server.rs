@@ -79,9 +79,31 @@ pub async fn serve(
 ) -> Result<()> {
     let applications = Applications::new(config.clone())?;
     applications
-        .install("application".into(), "/".into(), handlers)
+        .install("application".into(), "/".into(), handlers, false)
         .await?;
     serve_applications(config, applications, shutdown, on_ready).await
+}
+
+/// Serve one storage-enabled application, explicitly syncing after it drains.
+/// The keyspace identity is `application`; `root` selects the database directory.
+pub async fn serve_with_storage(
+    config: Config,
+    handlers: Vec<Handler>,
+    root: impl Into<std::path::PathBuf>,
+    shutdown: impl Future<Output = ()>,
+    on_ready: impl FnOnce(SocketAddr) + Send + Sync + 'static,
+) -> Result<()> {
+    let storage = Arc::new(crate::persistence::Storage::new(root));
+    let applications = Applications::with_storage(config.clone(), Some(storage.clone()))?;
+    let result = async {
+        applications
+            .install("application".into(), "/".into(), handlers, true)
+            .await?;
+        serve_applications(config, applications, shutdown, on_ready).await
+    }
+    .await;
+    let synced = tokio::task::spawn_blocking(move || storage.sync()).await?;
+    result.and(synced)
 }
 
 pub(crate) async fn serve_applications(

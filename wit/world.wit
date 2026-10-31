@@ -21,5 +21,6 @@ interface handler {
 
 /// A function receives a complete request and returns a complete response.
 world http-function {
+    import local:kv/store@0.1.0;
     export handler;
 }

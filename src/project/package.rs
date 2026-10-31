@@ -13,6 +13,7 @@ pub(crate) fn deployment(
     Ok(crate::control::protocol::Deployment {
         name: application.name,
         path_prefix: application.path_prefix,
+        kv: application.kv,
         handlers,
     })
 }

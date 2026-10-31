@@ -27,6 +27,8 @@ multiple applications at declarative, nonoverlapping path prefixes on one HTTP l
 atomic deployment, listing, removal, status, and shutdown. Deployments are
 in-memory and must be resubmitted after restarting the daemon. A foreground
 `wr admin` client serves a local, read-only browser view of live daemon metadata.
+Applications can opt into persistent typed KV values and atomic counters;
+storage identity and inspection survive application removal and replacement.
 Source discovery is independent of route configuration, within the
 [manifest and discovery constraints](docs/reference.md#source-discovery).
 
@@ -80,10 +82,14 @@ Observable acceptance conditions:
 - Pages show the daemon's PID and hosting address, and deployed application
   names and path prefixes in a stable order. Each application lists its deployed
   functions by name, with HTTP methods and application-relative route paths.
+  Database-wide KV metrics appear under Daemon. KV-enabled applications show
+  their keyspace file size in a column; other per-keyspace metrics are omitted.
+  Retained-only owners appear once, marked Disabled, with their file size.
   An empty daemon is explicitly shown as having no deployed applications.
-- Loading or refreshing a page queries live daemon metadata, so subsequent
+- Loading or automatically refreshing a page queries live daemon metadata, so subsequent
   requests reflect deployments, replacements, and removals without restarting
-  the UI. Inspection does not require application source directories or local
+  the UI. The browser refreshes every five seconds after a page load, including
+  error pages, without a manual Refresh button. Inspection does not require application source directories or local
   build outputs.
 - An unavailable daemon or failed metadata request produces a clear error
   within a bounded time, rather than displaying stale data as current. A later
@@ -97,7 +103,7 @@ Observable acceptance conditions:
   or its deployments.
 
 The initial UI provides inspection only. Browser-initiated deployment, removal,
-and daemon lifecycle changes, remote access, logs, and
+and daemon lifecycle changes, remote access, logs, and non-KV
 metrics are outside this requirement. The [admin reference](docs/reference.md#admin-ui)
 defines command options, page responses, and timeouts. Coverage in
 `admin_ui_reports_live_status_and_recovers` checks startup, metadata, errors,
@@ -108,247 +114,46 @@ mounts, and independence from local build outputs. It also checks function
 names, ordering, methods, escaped dynamic paths, and metadata preservation on
 failed deployment and refresh after replacement or removal.
 
-## Proposed increment: persistent application KV
+## Persistent application KV
 
-Status: planned, not implemented. Use one embedded Fjall database per host
-storage root with one isolated keyspace per application. The current schema,
-guest WIT, and reference still describe implemented behavior. The
-[proposed architecture](ARCHITECTURE.md#proposed-kv-storage) owns implementation
-responsibilities and rationale. KV persistence does not persist deployments.
-
-### Author workflow and scope
-
-An application opts in with one optional top-level boolean, `kv`, defaulting to
-`false`. The header of the [example manifest](examples/application.yaml) would be:
-
-```yaml
-name: hello
-path-prefix: /demo
-kv: true
-# Existing functions follow unchanged.
-```
-
-All functions in an enabled application share its keyspace. The host binds
-access to application identity; guests cannot select another keyspace or
-supply a database path. Path-like keys do not escape that binding. Guests
-receive no filesystem access, database-management API, or Fjall dependency.
-Handlers use generated host bindings.
-
-The first version provides typed get/set, delete, and integer increment.
-Guest-selected named stores,
-per-function permissions, scans, TTL, compare-and-set, multi-key transactions,
-SQL, remote backends, replication, online backup, and a data browser are outside
-this increment. Size and storage-health inspection is included. Hibernation,
-resource quotas, and horizontal scaling remain future work.
-
-### Proposed guest behavior
-
-Encode this interface in the [WIT contract](wit/world.wit) and explain generated
-bindings in the [guest notes](wit/README.md). Get and set share a WIT `value`
-variant with three cases: `bytes(list<u8>)`, `text(string)`, and `integer(s64)`.
-Integers are signed 64-bit values. The variant preserves the stored type;
-there are no implicit conversions or separate type-specific get/set calls.
-
-The proposed signatures below use `kv-error` for the typed errors described
-below; they become part of the authoritative WIT when implemented:
-
-```wit
-variant value {
-    bytes(list<u8>),
-    text(string),
-    integer(s64),
-}
-
-get: func(key: string) -> result<option<value>, kv-error>;
-set: func(key: string, entry: value) -> result<_, kv-error>;
-delete: func(key: string) -> result<bool, kv-error>;
-increment: func(key: string) -> result<s64, kv-error>;
-```
-
-| Operation | Result and meaning |
-| --- | --- |
-| `get(key)` | Optional typed value; absence, empty bytes, and empty text are distinct. |
-| `set(key, value)` | Replace both value and type; success after Fjall accepts the replacement under the default OS-buffer persistence policy. |
-| `delete(key)` | Atomically remove the key and report whether a value existed; absence succeeds with `false`. |
-| `increment(key)` | Atomically add one to an integer and return that operation's incremented value. A missing key is created as integer `1`. |
-
-Incrementing text or bytes returns `type-mismatch`, even if the contents look
-numeric. Incrementing the maximum signed 64-bit integer returns `overflow`.
-Both errors leave the stored value unchanged. Negative integers are supported;
-increment always adds one, with no wrapping or saturation.
-
-Keys are case-sensitive UTF-8 strings of 1–1,024 encoded bytes, compared without
-normalization. Byte and text payloads are limited to 0–1,048,576 bytes (1 MiB),
-measuring text as UTF-8 and excluding internal storage encoding overhead.
-Integers use the full signed 64-bit range. These are per-operation validation
-limits, not application quotas. Typed errors cover disabled capability,
-invalid key, oversized value, type mismatch, overflow, and storage failure. Guest
-errors do not expose host paths or stored values. The guest chooses how ordinary
-KV errors map to HTTP responses.
-
-Operations are individually atomic. Reads after a completed mutation see its
-result unless a later mutation has superseded it. Concurrent changes follow
-the database's operation ordering. Get followed by set is not an atomic update
-and is unsuitable for concurrent counters; use increment instead. Increment
-is atomic relative to set, delete, and other increments. Deletion's boolean
-must not be implemented by an unprotected get followed by remove.
-
-### Persistence policy
-
-Use Fjall's default flushing to OS buffers. Do not request a durable sync for
-every guest mutation. This writes to the filesystem through the OS cache; it
-is not a promise that calls touch only memory. Fjall owns journaling, buffering,
-background flushing, compaction, and recovery. There is no runner-owned live
-map, mutation queue, size/time batching policy, or snapshot writer.
-
-OS-buffered data is intended to survive a runner-process crash while the OS
-remains healthy. Successful mutations are not guaranteed durable against an OS
-crash or power loss. There is no promised maximum window of data loss or extra
-runner-managed periodic sync in the first version. A later guest trap, timeout,
-HTTP error, or disconnect does not roll back an accepted mutation. Failed or
-unacknowledged calls can have unknown outcomes; do not automatically replay
-guest operations or promise exactly-once execution.
-In particular, retrying an increment after an unknown outcome can increment
-the value twice.
-
-Graceful shutdown closes admission, drains control work and guest executions,
-then explicitly requests a database-wide durable sync before releasing handles.
-Report sync failure rather than claiming successful data preservation. Keep
-this operation observable instead of depending only on best-effort flushing
-when database handles are dropped.
-
-### Isolation and latency
-
-Keyspaces provide application data separation, enforced by binding each guest
-to only its own handle. They share database resources, journaling, background
-workers, and the underlying filesystem. They do not provide independent I/O,
-memory, fairness, corruption, or failure domains. A busy application or a shared
-storage fault can affect other KV applications.
-
-Avoiding a durable sync per call is the initial latency policy, not a guarantee
-against transient disk stalls. OS-buffer writes, reads missing caches, locking,
-and background maintenance can delay calls. Measure operation latency during
-alpha testing, including tail latency under storage pressure, before adding a
-second memory layer or changing engines. This replaces the earlier requirement
-that guest KV operations never wait on database I/O.
-
-Synchronous calls stay in the existing bounded blocking execution path. Check
-invocation expiry before and after host calls, but an in-flight native database
-call cannot be forcibly stopped by guest epochs. Retain the execution slot until
-it finishes; an expired call reports timeout even if its mutation succeeded.
-No application-registry publication lock may be held during database I/O.
-
-### Alpha resource policy and observability
-
-Add no runner-enforced per-application size limits in the alpha. Keep Fjall's
-normal cache, buffer, and maintenance controls; this policy does not require
-unbounded engine memory or disabling its backpressure. Retain per-operation
-validation. Assess future per-application quotas using observed workloads.
-
-Expose database and keyspace metadata through daemon status and the read-only
-admin UI, periodic foreground diagnostics, and the host storage API. Include
-retained keyspaces after application removal or disabling KV. Record:
-
-- Per-application operation counts, failures, and elapsed-time summaries,
-  including maxima to reveal intermittent latency spikes.
-- Fjall-reported per-keyspace disk usage and estimated entry count, clearly
-  labelled as estimates rather than exact live payload or memory usage.
-- Database-wide disk usage and journal count, plus additional inexpensive engine
-  statistics when the selected release exposes them.
-- Storage errors and the status/duration of explicit durable sync operations.
-
-Estimated entry counts can diverge substantially after updates/deletes. Shared
-journals and caches cannot be assigned accurately to individual applications;
-do not present per-keyspace disk usage as an application's complete footprint.
-Do not rebuild a mirror map or scan all entries merely to provide exact metrics.
-Do not invent per-application pending-queue or flush-age metrics that the engine
-does not expose. Counter scope is the host lifetime; samples reset on restart.
-Logs contain metadata, never keys or values. No separate telemetry service is
-required. Report fatal shared-engine errors with their database-wide scope.
-
-### Storage identity and lifecycle
-
-Fjall uses a database directory containing managed files. One database is owned
-by each selected host root, with the validated manifest name as the keyspace:
-
-| Mode | Database directory | Application keyspace |
-| --- | --- | --- |
-| Daemon | `<state-dir>/kv/` | Manifest `name` |
-| Foreground `wr run` | `<application-directory>/.wr-data/kv/` | Manifest `name` |
-
-Daemon state-directory selection retains its [existing rules](docs/reference.md#daemon-and-deployment).
-Foreground and daemon data remain separate. Setup adds the foreground data
-directory to ignore rules; clean preserves it outside generated `.wr/` output.
-Setup, build, update, and previews do not open/create the database.
-
-Open the shared database lazily on the first enabled application's preparation,
-then retain it until host shutdown. Open/create its keyspace before publication;
-a disabled application neither initializes the database nor gains a handle.
-Validate managed paths/private Unix permissions. Locked, inaccessible, corrupt,
-or incompatible storage fails preparation without truncating existing data or
-changing published routes. Failed preparation may leave a newly created empty
-keyspace or initialized database. Do not silently substitute empty storage.
-
-Retain application handles across generations and removal. Changing routes,
-prefixes, or components preserves the keyspace. A daemon deployment's source
-location is irrelevant. Renaming selects a different keyspace and retains the
-old data. Old requests can finish writes after replacement/removal; application
-data formats must tolerate overlapping generations.
-
-Removal, disabling KV, and clean do not delete keyspaces. Redeploying the same
-identity reuses its data. Restart recovery reopens the database, while daemon
-deployments still start empty until explicitly resubmitted. No second process
-may concurrently own the same database directory. There is no automatic data
-deletion, reset command, or multi-process sharing. Offline backup covers the
-whole database directory after stopping its owner, not an individual keyspace
-file.
-
-### Guest compatibility
-
-Add a separately versioned KV import while preserving the existing HTTP export
-and compatibility with previously built HTTP-only components. Link the import
-and enforce capability on every call. Unsupported imports fail preparation
-with an actionable diagnostic. Deployment carries only the capability flag,
-never database contents or paths; the daemon validates it independently.
-Document daemon/client upgrade requirements for changed wire metadata.
+Applications opt into persistent typed values with `kv: true`. One embedded
+Fjall database per host root isolates applications by their validated names.
+Exact behavior belongs to the [storage reference](docs/reference.md#persistent-application-kv),
+[schema](application.schema.json), and [guest interface](wit/deps/kv/store.wit).
+The [storage architecture](ARCHITECTURE.md#kv-storage) explains responsibilities.
+KV persistence does not persist deployments.
 
 ### Acceptance conditions
 
-These are future checks, not claims of current coverage. Exercise public storage
-operations and the real-component workflows in [tests/cli.rs](tests/cli.rs):
+- Bytes, UTF-8 text, and signed integers retain their types; absence and empty
+  values remain distinct. Keys and payloads obey the documented limits.
+- Increment atomically adds one, initializes absence, and returns its own
+  committed result. Type mismatch and overflow preserve the prior value.
+  Delete atomically reports whether a value existed.
+- Each application sees only its own keyspace. Functions and overlapping
+  generations of one application share values. Replacement, removal,
+  disabling/re-enabling, prefix changes, and cleanup preserve stored data.
+- Storage opens lazily before publication; invalid or locked storage cannot
+  replace published routes or silently substitute empty data. Authoring
+  commands and disabled applications do not create databases.
+- Default OS-buffered mutations survive process restart under a healthy OS.
+  A later trap, timeout, or disconnect does not undo accepted writes.
+  Graceful shutdown drains preparation and executions and explicitly syncs.
+  No per-mutation power-loss durability or bounded I/O latency is promised.
+- Previously built HTTP-only components work. YAML and control messages validate
+  the capability flag; every guest call checks its bound capability.
+- Inspection retains inactive keyspaces and reports operation counts/errors,
+  timings, estimated entry counts, keyspace and database sizes, and sync outcomes. Unavailable
+  engine measurements are explicitly unavailable, never fabricated as zero.
 
-- Old HTTP-only components work; invalid flags fail YAML/control validation;
-  disabled access creates no storage and cannot acquire another app's handle.
-- Bytes, UTF-8 text, and signed integers round-trip with their types through
-  real guest calls, including empty payloads, integer bounds, absence,
-  replacement with a different type, per-operation limits, atomic delete
-  results, and read-after-write behavior.
-- Increment initializes missing keys, supports negative integers, and returns
-  its own committed result. Concurrent increments lose no updates; set/delete
-  share the same atomic ordering. Type mismatch and overflow preserve data.
-  Typed values survive explicit sync and reopen.
-- Identical keys in different application keyspaces remain independent; functions
-  in one application and overlapping generations share its data.
-- Replacement, removal/redeployment, disabling/re-enabling, prefix changes,
-  and clean preserve data; authoring commands do not initialize the database.
-- Graceful shutdown durably syncs before release. Runner-process restart recovers
-  OS-buffered writes under a healthy OS; power-loss durability is tested only
-  after an explicit successful durable sync and is not claimed per mutation.
-- Invalid/locked storage cannot publish a replacement or truncate data. Shared
-  engine errors are reported without pretending other keyspaces are independent.
-- Status includes retained keyspaces, labelled engine estimates, operation
-  timing/errors, and database sync results without exposing keys or values.
-
-Measure normal and tail latency under representative alpha workloads and slow
-storage. Do not turn the previous no-I/O-stall promise into an unsupported test
-assertion. Use documented manual scenarios when deterministic public-interface
-coverage is impractical. Run `make check` after implementation; documentation
-review does not verify KV behavior. Move exact implemented contracts to their
-schema/WIT/reference owners when shipping.
+Coverage uses [public storage tests](tests/storage.rs) and real components and
+process workflows in [CLI tests](tests/cli.rs). Operational slow-storage and
+power-loss validation remain [manual procedures](docs/guides.md#observe-kv-storage).
+These tests do not establish production latency targets.
 
 ## Deliberate exclusions
 
-This increment does not provide SQL/KV host services or non-HTTP event triggers.
+This increment does not provide SQL host services or non-HTTP event triggers.
 The custom guest interface is not WASI HTTP. Prebuilt module declarations,
 automatic builds on run, automatic prerequisite installation, file watching,
 streaming, TLS configuration, rate limiting, custom schedulers, persistent

@@ -164,6 +164,52 @@ Regenerate with `wr setup examples` for editor preparation or
 `wr build examples` for components. See [cleanup behavior](reference.md#clean)
 for the exact removal and preservation set.
 
+## Use a persistent counter
+
+The example manifest enables `kv: true`. Its [counter](../examples/functions/counter.rs)
+uses `crate::kv::increment("visits")` and returns the committed count:
+
+```sh
+wr update examples
+wr build examples
+wr run examples --listen 127.0.0.1:9001
+# In another terminal:
+curl http://127.0.0.1:9001/demo/counter
+curl http://127.0.0.1:9001/demo/counter
+```
+
+The second request returns one more than the first. Stop gracefully and run
+again: the count continues. `wr clean examples` preserves the data; rebuild
+before serving again. Daemon deployments use separate storage. Changing the
+application name starts a different counter and retains the old keyspace.
+See [KV reference](reference.md#persistent-application-kv) before designing
+retries or backing up data.
+
+## Observe KV storage
+
+Use `wr daemon status` to inspect retained keyspaces, operation
+counts/errors, elapsed-time totals and maxima, entry estimates, and shared
+database usage. The admin page shows shared database statistics and a keyspace
+file-size column. Foreground hosts emit the status metadata every 30 seconds.
+Successful graceful shutdown logs the explicit durable-sync duration.
+
+For an alpha latency check, run the counter above on a representative filesystem
+and collect request durations (for example `curl -w '%{time_total}\n' -o /dev/null`).
+Repeat sequentially, then with concurrent clients and several applications.
+Compare median, p95, p99, and maxima with the operation totals/maxima; HTTP
+durations include guest instantiation and transport. Repeat on a disposable
+slow or pressured filesystem, recording hardware, workload, and engine version.
+Watch for stalls and shared effects rather than treating namespaces as I/O
+isolation. No production latency target is established by the automated suite.
+
+On disposable data only, verify that killing the process after an acknowledged
+write and redeploying recovers the value under a healthy OS. Graceful stop must
+log successful sync before a whole-directory offline backup. OS/power-loss
+durability requires a separate controlled environment and explicit successful
+sync; a normal process restart does not test it. Read-only/corrupt/locked
+storage must reject preparation while preserving any current routes. Never
+corrupt or stress production storage to perform these checks.
+
 ## Manually exercise failures and concurrency
 
 The example application includes [misbehave](../examples/functions/misbehave.rs),
@@ -263,8 +309,8 @@ Open the printed `Admin UI listening on http://...` URL in a browser. The page
 shows the daemon PID, hosting address, and application names and path prefixes.
 Each application's Functions column lists deployed function names, HTTP methods,
 and paths relative to that application's prefix.
-Use Refresh after deploying, replacing, or removing an application to retrieve
-its current state. An empty daemon is shown as having no deployed applications.
+The page refreshes automatically after deploying, replacing, or removing an
+application. An empty daemon is shown as having no deployed applications.
 
 For a fixed UI port, use `wr admin --listen 127.0.0.1:9001`. To inspect an
 isolated daemon, pass its usual `--state-dir <DIRECTORY>` to the admin command.
@@ -272,7 +318,8 @@ The UI works from any directory and needs no local application files.
 
 If the page reports unavailable metadata, check the selected state directory
 and run `wr daemon status` with the same selection. Start the daemon if needed,
-then refresh the page. The UI may remain running while the daemon restarts.
+and the page will recover on an automatic refresh. The UI may remain running
+while the daemon restarts.
 Ctrl-C in the admin terminal stops only the UI; the daemon and deployed
 applications keep running. See [Admin UI](reference.md#admin-ui) for the exact
 listener, response, and timeout behavior.
