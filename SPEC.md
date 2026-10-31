@@ -134,7 +134,8 @@ supply a database path. Path-like keys do not escape that binding. Guests
 receive no filesystem access, database-management API, or Fjall dependency.
 Handlers use generated host bindings.
 
-The first version provides get, set, and delete. Guest-selected named stores,
+The first version provides typed get/set, delete, and integer increment.
+Guest-selected named stores,
 per-function permissions, scans, TTL, compare-and-set, multi-key transactions,
 SQL, remote backends, replication, online backup, and a data browser are outside
 this increment. Size and storage-health inspection is included. Hibernation,
@@ -143,26 +144,54 @@ resource quotas, and horizontal scaling remain future work.
 ### Proposed guest behavior
 
 Encode this interface in the [WIT contract](wit/world.wit) and explain generated
-bindings in the [guest notes](wit/README.md).
+bindings in the [guest notes](wit/README.md). Get and set share a WIT `value`
+variant with three cases: `bytes(list<u8>)`, `text(string)`, and `integer(s64)`.
+Integers are signed 64-bit values. The variant preserves the stored type;
+there are no implicit conversions or separate type-specific get/set calls.
+
+The proposed signatures below use `kv-error` for the typed errors described
+below; they become part of the authoritative WIT when implemented:
+
+```wit
+variant value {
+    bytes(list<u8>),
+    text(string),
+    integer(s64),
+}
+
+get: func(key: string) -> result<option<value>, kv-error>;
+set: func(key: string, entry: value) -> result<_, kv-error>;
+delete: func(key: string) -> result<bool, kv-error>;
+increment: func(key: string) -> result<s64, kv-error>;
+```
 
 | Operation | Result and meaning |
 | --- | --- |
-| `get(key)` | Optional bytes; absence and a present zero-byte value are distinct. |
-| `set(key, value)` | Success after Fjall accepts the replacement under the default OS-buffer persistence policy. |
+| `get(key)` | Optional typed value; absence, empty bytes, and empty text are distinct. |
+| `set(key, value)` | Replace both value and type; success after Fjall accepts the replacement under the default OS-buffer persistence policy. |
 | `delete(key)` | Atomically remove the key and report whether a value existed; absence succeeds with `false`. |
+| `increment(key)` | Atomically add one to an integer and return that operation's incremented value. A missing key is created as integer `1`. |
+
+Incrementing text or bytes returns `type-mismatch`, even if the contents look
+numeric. Incrementing the maximum signed 64-bit integer returns `overflow`.
+Both errors leave the stored value unchanged. Negative integers are supported;
+increment always adds one, with no wrapping or saturation.
 
 Keys are case-sensitive UTF-8 strings of 1–1,024 encoded bytes, compared without
-normalization. Values are opaque bytes of 0–1,048,576 bytes (1 MiB). These are
-per-operation validation limits, not application quotas. Typed errors cover
-disabled capability, invalid key, oversized value, and storage failure. Guest
+normalization. Byte and text payloads are limited to 0–1,048,576 bytes (1 MiB),
+measuring text as UTF-8 and excluding internal storage encoding overhead.
+Integers use the full signed 64-bit range. These are per-operation validation
+limits, not application quotas. Typed errors cover disabled capability,
+invalid key, oversized value, type mismatch, overflow, and storage failure. Guest
 errors do not expose host paths or stored values. The guest chooses how ordinary
 KV errors map to HTTP responses.
 
 Operations are individually atomic. Reads after a completed mutation see its
 result unless a later mutation has superseded it. Concurrent changes follow
 the database's operation ordering. Get followed by set is not an atomic update
-and is unsuitable for concurrent counters. Deletion's boolean must not be
-implemented by an unprotected get followed by remove.
+and is unsuitable for concurrent counters; use increment instead. Increment
+is atomic relative to set, delete, and other increments. Deletion's boolean
+must not be implemented by an unprotected get followed by remove.
 
 ### Persistence policy
 
@@ -179,6 +208,8 @@ runner-managed periodic sync in the first version. A later guest trap, timeout,
 HTTP error, or disconnect does not roll back an accepted mutation. Failed or
 unacknowledged calls can have unknown outcomes; do not automatically replay
 guest operations or promise exactly-once execution.
+In particular, retrying an increment after an unknown outcome can increment
+the value twice.
 
 Graceful shutdown closes admission, drains control work and guest executions,
 then explicitly requests a database-wide durable sync before releasing handles.
@@ -288,8 +319,14 @@ operations and the real-component workflows in [tests/cli.rs](tests/cli.rs):
 
 - Old HTTP-only components work; invalid flags fail YAML/control validation;
   disabled access creates no storage and cannot acquire another app's handle.
-- Binary/empty values, absence, overwrite, atomic delete results, per-operation
-  limits, and read-after-write behavior work through real guest calls.
+- Bytes, UTF-8 text, and signed integers round-trip with their types through
+  real guest calls, including empty payloads, integer bounds, absence,
+  replacement with a different type, per-operation limits, atomic delete
+  results, and read-after-write behavior.
+- Increment initializes missing keys, supports negative integers, and returns
+  its own committed result. Concurrent increments lose no updates; set/delete
+  share the same atomic ordering. Type mismatch and overflow preserve data.
+  Typed values survive explicit sync and reopen.
 - Identical keys in different application keyspaces remain independent; functions
   in one application and overlapping generations share its data.
 - Replacement, removal/redeployment, disabling/re-enabling, prefix changes,
