@@ -3,14 +3,22 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rocket::{Route, http::uri::Origin, local::asynchronous::Client};
 
-use super::server::{Handler, RegisteredHandler, State};
+use super::{
+    metrics::HandlerMetrics,
+    server::{Handler, RegisteredHandler, State},
+};
 use crate::runtime::Runtime;
+
+pub(super) struct Prepared {
+    pub routes: Vec<Route>,
+    pub metrics: HandlerMetrics,
+}
 
 pub(super) fn prepare(
     handlers: Vec<Handler>,
     timeout: std::time::Duration,
     store: Option<Arc<crate::persistence::KvStore>>,
-) -> Result<Vec<Route>> {
+) -> Result<Prepared> {
     let mut runtime = match store {
         Some(store) => Runtime::with_store(timeout, store)?,
         None => Runtime::new(timeout)?,
@@ -34,7 +42,8 @@ pub(super) fn prepare(
         prepared.push((handler, method, module));
     }
     let runtime = Arc::new(runtime);
-    Ok(prepared
+    let mut metrics = HandlerMetrics::new();
+    let routes = prepared
         .into_iter()
         .map(|(handler, method, module)| {
             let mut route = Route::new(
@@ -42,6 +51,7 @@ pub(super) fn prepare(
                 &handler.path,
                 RegisteredHandler {
                     name: handler.name.clone(),
+                    metrics: metrics.entry(handler.name.clone()).or_default().clone(),
                     module: Arc::new(module),
                     runtime: runtime.clone(),
                 },
@@ -49,7 +59,8 @@ pub(super) fn prepare(
             route.name = Some(handler.name.into());
             route
         })
-        .collect())
+        .collect();
+    Ok(Prepared { routes, metrics })
 }
 
 pub(super) async fn dispatcher(routes: Vec<Route>, state: Arc<State>) -> Result<Client> {

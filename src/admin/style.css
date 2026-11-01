@@ -30,6 +30,10 @@ th, td { padding: 12px 8px; overflow-wrap: anywhere; border-bottom: 1px solid #d
 .functions { list-style: none; padding: 0; margin: 0; }
 .functions li + li { margin-top: 12px; }
 .functions span { display: block; }
+.functions a { color: inherit; text-underline-offset: 3px; }
+.handler-latency { font-size: .8rem; font-variant-numeric: tabular-nums; }
+.metrics-note { font-size: .875rem; color: #536474; }
+.metrics-summary { grid-template-columns: repeat(4, 1fr); }
 thead th { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: #536474; }
 tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
 .empty { color: #536474; margin: 0; }
@@ -40,6 +44,7 @@ footer { font-size: .8rem; margin-top: 28px; }
   body { padding: 28px 16px; }
   h1 { font-size: 1.5rem; }
   dl { grid-template-columns: 1fr; gap: 16px; }
+  .metrics-summary { grid-template-columns: repeat(2, 1fr); }
   section { padding: 20px; }
 }
 @media (prefers-color-scheme: dark) {
@@ -49,5 +54,6 @@ footer { font-size: .8rem; margin-top: 28px; }
   th, td { border-color: #3b4a58; }
   .application-table > table > tbody + tbody { border-color: #3b4a58; }
   .status.disabled { color: #aab9c7; }
+  .metrics-note { color: #aab9c7; }
   .error { border-left-color: #e48a64; }
 }

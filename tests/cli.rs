@@ -240,6 +240,17 @@ fn exercise_kv_daemon(component: &[u8]) {
     assert!(second_metrics.contains("/two</code>"));
     daemon.success(&["deploy", first.directory.to_str().unwrap()]);
     assert!(http(&address, "GET", "/moved/").ends_with("4"));
+    assert!(http(&address, "GET", "/moved/trap").starts_with("HTTP/1.1 500"));
+    assert!(http(&address, "GET", "/moved/timeout").starts_with("HTTP/1.1 504"));
+    let detail = http(
+        &admin.address,
+        "GET",
+        "/applications/first/handlers/counter",
+    );
+    assert!(detail.contains("<dt>Completed calls</dt><dd>3</dd>"));
+    for code in [200, 500, 504] {
+        assert!(detail.contains(&format!("<th scope=\"row\">{code}</th><td>1</td>")));
+    }
     let page = admin.page();
     assert_eq!(page.matches("data-application=\"first\"").count(), 1);
     let first_metrics = admin_application(&page, "first");
@@ -1615,7 +1626,23 @@ fn admin_ui_reports_live_status_and_recovers() {
 
     let mut admin = AdminFixture::start(&daemon.directory.join("d"));
     assert!(admin.page().starts_with("HTTP/1.1 503"));
+    assert!(
+        http(
+            &admin.address,
+            "GET",
+            "/applications/missing/handlers/missing"
+        )
+        .starts_with("HTTP/1.1 503")
+    );
     let address = daemon.start();
+    assert!(
+        http(
+            &admin.address,
+            "GET",
+            "/applications/missing/handlers/missing"
+        )
+        .starts_with("HTTP/1.1 404")
+    );
     let page = admin.page();
     assert!(page.starts_with("HTTP/1.1 200"));
     assert!(page.to_lowercase().contains("content-type: text/html"));
@@ -1632,19 +1659,26 @@ fn admin_ui_reports_live_status_and_recovers() {
         .unwrap();
     assert!(page.contains(&format!("<dd>{pid}</dd>")));
     assert!(!page.contains("<script"));
-    assert!(page.contains("<meta http-equiv=\"refresh\" content=\"5\">"));
+    assert!(
+        page.to_ascii_lowercase()
+            .contains("\r\nrefresh: 5;url=/\r\n")
+    );
     assert!(!page.contains("class=\"refresh\""));
     assert!(!page.contains("Live metadata from your selected daemon."));
     let styles = http(&admin.address, "GET", "/style.css");
     assert!(styles.starts_with("HTTP/1.1 200"));
     assert!(styles.to_lowercase().contains("content-type: text/css"));
     assert!(styles.contains("@media"));
+    assert!(!styles.to_ascii_lowercase().contains("\r\nrefresh:"));
     assert!(http(&admin.address, "POST", "/").starts_with("HTTP/1.1 404"));
     daemon.success(&["daemon", "stop"]);
     let page = admin.page();
     assert!(page.starts_with("HTTP/1.1 503"));
     assert!(!page.contains("<dd>Running</dd>"));
-    assert!(page.contains("<meta http-equiv=\"refresh\" content=\"5\">"));
+    assert!(
+        page.to_ascii_lowercase()
+            .contains("\r\nrefresh: 5;url=/\r\n")
+    );
     let address = daemon.start();
     assert!(admin.page().contains(&format!("http://{address}")));
     admin.stop("-INT");
@@ -1835,7 +1869,7 @@ fn deploy_built_examples(directory: &std::path::Path) {
     let mut previous = 0;
     for (name, method, path) in functions {
         let entry =
-            format!("<strong>{name}</strong><span><code>{method}</code> <code>{path}</code>");
+            format!("<strong>{name}</strong></a><span><code>{method}</code> <code>{path}</code>");
         let position = first_row
             .find(&entry)
             .expect("deployed function with method and escaped path");
@@ -1844,6 +1878,29 @@ fn deploy_built_examples(directory: &std::path::Path) {
     }
     assert!(!page.contains("<user_id>"));
     assert!(!page.contains("<path..>"));
+    assert!(page.contains("Min — · Max —"));
+    assert!(page.contains("href=\"/applications/first/handlers/greet\""));
+    let detail = http(&admin.address, "GET", "/applications/first/handlers/greet");
+    assert!(detail.starts_with("HTTP/1.1 200"));
+    assert!(detail.contains("No completed calls in this window."));
+    assert!(detail.contains("<dt>Minimum latency</dt><dd>—</dd>"));
+    assert!(detail.contains("href=\"/#applications\""));
+    assert!(
+        detail
+            .to_ascii_lowercase()
+            .contains("\r\nrefresh: 5;url=/applications/first/handlers/greet\r\n")
+    );
+    assert!(
+        detail
+            .to_ascii_lowercase()
+            .contains("cache-control: no-store")
+    );
+    let detail = http(
+        &admin.address,
+        "GET",
+        "/applications/first/handlers/inspect",
+    );
+    assert!(detail.contains("/users/&lt;user_id&gt;/orders"));
     assert_eq!(daemon.start(), address);
     assert_eq!(
         daemon.success(&["apps", "list"]),
@@ -1896,6 +1953,27 @@ fn deploy_built_examples(directory: &std::path::Path) {
         );
     }
 
+    for name in ["first", "second"] {
+        let detail = http(
+            &admin.address,
+            "GET",
+            &format!("/applications/{name}/handlers/greet"),
+        );
+        assert!(
+            detail.contains("<dt>Completed calls</dt><dd>2</dd>"),
+            "{name}: {detail}"
+        );
+        assert!(detail.contains("<th scope=\"row\">200</th><td>2</td>"));
+        assert!(!detail.contains("<dd>—</dd>"));
+        let detail = http(
+            &admin.address,
+            "GET",
+            &format!("/applications/{name}/handlers/echo"),
+        );
+        assert!(detail.contains("<dt>Completed calls</dt><dd>1</dd>"));
+        assert!(detail.contains("<th scope=\"row\">400</th><td>1</td>"));
+    }
+    let before_failure = admin.page();
     fs::write(
         first.directory.join(".wr/components/greet.wasm"),
         b"invalid",
@@ -1907,12 +1985,12 @@ fn deploy_built_examples(directory: &std::path::Path) {
             .status
             .success()
     );
-    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
     assert_eq!(
         admin.page().split_once("\r\n\r\n").unwrap().1,
-        page.split_once("\r\n\r\n").unwrap().1,
-        "failed deployment preserves function metadata"
+        before_failure.split_once("\r\n\r\n").unwrap().1,
+        "failed deployment preserves function metadata and metrics"
     );
+    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
     fs::copy(
         directory.join(".wr/components/greet.wasm"),
         first.directory.join(".wr/components/greet.wasm"),
@@ -1960,6 +2038,15 @@ fn deploy_built_examples(directory: &std::path::Path) {
         daemon.success(&["deploy", first.directory.to_str().unwrap()]);
         requests.join().unwrap();
     });
+    let detail = http(&admin.address, "GET", "/applications/first/handlers/greet");
+    assert!(detail.contains("No completed calls in this window."));
+    assert!(detail.contains("/updated-hello</code>"));
+    assert!(
+        http(&admin.address, "GET", "/applications/first/handlers/echo")
+            .starts_with("HTTP/1.1 404")
+    );
+    let detail = http(&admin.address, "GET", "/applications/second/handlers/greet");
+    assert!(detail.contains("<dt>Completed calls</dt><dd>46</dd>"));
     assert!(http(&address, "GET", "/apps/one/hello").starts_with("HTTP/1.1 404"));
     assert!(http(&address, "GET", "/replacement/updated-hello").ends_with("Hello, world!"));
     let page = admin.page();
@@ -1995,6 +2082,10 @@ fn deploy_built_examples(directory: &std::path::Path) {
     assert!(!page.contains(">first</th>"));
     assert!(page.contains(">second</th>"));
     assert!(!page.contains("<code>/updated-hello</code>"));
+    assert!(
+        http(&admin.address, "GET", "/applications/first/handlers/greet")
+            .starts_with("HTTP/1.1 404")
+    );
     assert!(http(&address, "GET", "/replacement/updated-hello").starts_with("HTTP/1.1 404"));
     assert_eq!(
         daemon.success(&["apps", "list"]),
@@ -2018,7 +2109,7 @@ fn deploy_built_examples(directory: &std::path::Path) {
     let page = admin.page();
     assert!(page.contains(">first</th>"));
     assert!(page.contains("<code>/</code>"));
-    assert!(page.contains("<strong>greet</strong><span><code>GET</code> <code>/hello</code>"));
+    assert!(page.contains("<strong>greet</strong></a><span><code>GET</code> <code>/hello</code>"));
     admin.stop("-TERM");
     assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
     daemon.success(&["daemon", "stop"]);

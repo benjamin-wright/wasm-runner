@@ -517,6 +517,11 @@ showing the daemon PID, hosting address, and application names and path prefixes
 sorted by name. Each application includes its deployed functions sorted by name,
 with their HTTP methods and application-relative route paths (before the
 application's path prefix is applied). Dynamic captures are displayed literally.
+Each function shows its rolling minimum and maximum latency and links to
+`GET /applications/<application>/handlers/<handler>`. This detail page shows
+completed call count, minimum/maximum/mean latency, and counts by HTTP response
+code. A handler that is no longer deployed returns an HTTP 404 page. Both views
+use the [handler metrics](#handler-metrics) below.
 The Daemon section includes database-wide KV statistics. Each application's
 row groups its routes and a Keyspace file bytes column, which shows file size
 for KV-enabled applications and a dash for deployed applications with KV off.
@@ -528,9 +533,13 @@ The application count includes both groups, each name appearing once.
 Metric definitions are in [KV inspection](#inspection-and-alpha-limits).
 Only deployed functions appear; source files without configured routes are not
 deployed. An empty registry is shown explicitly. The browser reloads the page
-five seconds after each load using HTML timed refresh, querying current metadata
+five seconds after each load using an HTTP `Refresh` header, querying current metadata
 without a Refresh button. Error pages use the same automatic refresh, allowing
-recovery after a daemon restart. This refresh reloads the whole page. `GET /style.css`
+recovery after a daemon restart. This refresh reloads the whole page.
+The refresh URL explicitly preserves the page path and query, omitting any
+fragment such as `#applications` so browsers fetch fresh metadata instead of
+performing an in-page navigation. The first refresh after following a fragment
+link therefore returns to the top of the page. `GET /style.css`
 serves the bundled stylesheet. Rocket supplies HEAD fallback. No browser
 JavaScript, external assets, application source directories, or local build
 outputs are required.
@@ -548,6 +557,36 @@ within their deadline. This leaves the daemon and its applications running.
 The UI never occupies application routes, even when an application owns `/`.
 It provides local inspection only, with no remote or multi-user administration
 contract. See the [browser inspection recipe](guides.md#inspect-the-daemon-in-a-browser).
+
+### Handler metrics
+
+Each active handler keeps an in-memory five-minute window, aggregated into
+one-second buckets using a monotonic clock. The window includes the current
+second and the previous 299 seconds; calls may expire up to one second before
+their exact five-minute age. Recording and inspection discard expired buckets,
+including when a handler becomes idle. Memory is bounded by 300 buckets per
+handler, independently of traffic volume. Only aggregate counts and timings
+are retained; request paths, bodies, headers, and individual samples are not.
+
+One call is counted when a matched handler finishes dispatch and produces an
+HTTP response. Latency is measured from entry into the matched handler through
+request adaptation, execution admission, component execution, and response
+validation. It excludes the gateway's initial request upload and network
+response delivery. Guest HTTP errors retain their status; host errors use their
+mapped status (for example, 500 for traps/invalid responses, 504 for execution
+timeouts, and 503 for rejected admission). HEAD fallback counts against the
+selected GET handler. Unmatched requests, gateway rejections before handler
+selection, and cancelled dispatches do not contribute. A completed dispatch
+does not guarantee the client received the response.
+
+Minimum, maximum, and arithmetic mean latency are reported in milliseconds.
+An empty window has zero calls, no response code counts, and `null` latencies
+(shown as a dash in the UI). These are window counts, not lifetime totals.
+Metrics belong to the deployed generation: successful replacement resets them,
+failed replacement preserves them, and removal or daemon restart discards them.
+In-flight old-generation requests cannot contribute to the replacement's window.
+The admin detail page refreshes and handles metadata failures exactly like the
+overview; it does not maintain its own metrics cache.
 
 ## Daemon and deployment
 
@@ -624,7 +663,11 @@ values). Remove includes `name`. Responses use `result: ok`, `applications`
 (with `message`). Both application lists contain objects with `name`,
 `path-prefix`, `kv`, and `functions` fields. `functions` is sorted by name and contains
 objects with `name`, `method`, and application-relative `path` from the active
-routes. Component bytes are not included in these metadata responses. CLI list
+routes, plus `metrics`. The metrics object contains `window_seconds` (300),
+`calls`, `latency_min_ms`, `latency_max_ms`, `latency_mean_ms`, and
+`response_codes` (an object mapping numeric HTTP status strings to counts).
+See [handler metrics](#handler-metrics) for measurement and lifecycle semantics.
+Component bytes are not included in these metadata responses. CLI list
 displays application names and prefixes; status also displays storage metadata.
 Four control requests may run concurrently; excess connections
 are closed. Client reads time out after 120 seconds; a timeout does not cancel a
@@ -643,3 +686,7 @@ After upgrading from a version without function metadata, restart the daemon
 and redeploy applications before using the updated client. List and status
 responses require `functions`; an older daemon's response produces a metadata
 error rather than an empty function list.
+
+After upgrading from a version without handler metrics, restart the daemon and
+redeploy before using the updated admin client. Missing `metrics` is a metadata
+error, rather than being presented as a zero-call window.

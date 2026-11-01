@@ -9,6 +9,7 @@ use rocket::local::asynchronous::Client;
 use serde::{Deserialize, Serialize};
 
 use super::{
+    metrics::{HandlerMetrics, Snapshot},
     routing,
     server::{Config, Handler, State},
 };
@@ -24,6 +25,7 @@ pub(super) struct Application {
     path_prefix: String,
     pub(super) client: Client,
     kv: bool,
+    metrics: HandlerMetrics,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub(crate) struct FunctionInfo {
     pub name: String,
     pub method: String,
     pub path: String,
+    pub metrics: Snapshot,
 }
 
 impl Applications {
@@ -79,14 +82,14 @@ impl Applications {
                     .client
                     .rocket()
                     .routes()
-                    .map(|route| FunctionInfo {
-                        name: route
-                            .name
-                            .as_deref()
-                            .expect("named application route")
-                            .to_owned(),
-                        method: route.method.to_string(),
-                        path: route.uri.to_string(),
+                    .map(|route| {
+                        let name = route.name.as_deref().expect("named application route");
+                        FunctionInfo {
+                            name: name.to_owned(),
+                            method: route.method.to_string(),
+                            path: route.uri.to_string(),
+                            metrics: application.metrics[name].snapshot(),
+                        }
                     })
                     .collect();
                 functions.sort_by(|left, right| left.name.cmp(&right.name));
@@ -142,11 +145,12 @@ impl Applications {
             routing::prepare(handlers, timeout, store)
         })
         .await??;
-        let client = routing::dispatcher(prepared, self.state.clone()).await?;
+        let client = routing::dispatcher(prepared.routes, self.state.clone()).await?;
         let application = Arc::new(Application {
             path_prefix,
             client,
             kv,
+            metrics: prepared.metrics,
         });
         let mut current = self.current.write().expect("application registry");
         ensure!(

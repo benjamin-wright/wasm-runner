@@ -25,6 +25,7 @@ guest workspaces.
 | [Applications](src/hosting/applications.rs) | Prepare, publish, list, and remove application generations |
 | [Routing](src/hosting/routing.rs) | Construct and validate each application’s prepared Rocket routes |
 | [Hosting server](src/hosting/server.rs) | Translate HTTP, bound execution admission, and drain shutdown |
+| [Handler metrics](src/hosting/metrics.rs) | Aggregate bounded per-generation handler windows and produce snapshots |
 | [Runtime](src/runtime/mod.rs) | Compile components, own the engine/ticker, and invoke fresh isolated instances |
 | [Persistence](src/persistence/storage.rs) | Own the shared database, bind application keyspaces, validate typed operations, sync, and inspect |
 
@@ -151,18 +152,36 @@ from each active Rocket dispatcher. This keeps inspection tied to the published
 generation without retaining a second copy of deployment metadata or component
 bytes. Functions are sorted by name before being returned over control transport.
 
+Route preparation also creates a shared metrics window per handler name. The
+registered handler records completed dispatch latency and the translated HTTP
+status through the metrics API. That API owns the per-handler mutex and samples
+the clock while holding it, keeping timestamps ordered without exposing that
+requirement to callers. The application generation owns the same metrics and
+snapshots them when listing its functions. One-second aggregate
+buckets bound memory independently of request volume; expiry on both recording
+and inspection avoids a timer task and keeps idle views current. Generation
+ownership naturally isolates replacement metrics from still-running old calls.
+The runtime has no knowledge of HTTP metrics or admin presentation.
+
 The control client provides synchronous transport for existing CLI commands
 and asynchronous transport for HTTP handlers, sharing wire encoding and reply
 validation. The UI bounds the complete async exchange with a deadline;
 cancellation drops the socket instead of leaving a blocked worker behind.
-There is no metadata cache or server-side polling task. The page shell uses
-HTML timed refresh to reload every five seconds after loading, including error
-pages, so each refresh follows the same request path. The CLI owns process signals and
+There is no metadata cache or server-side polling task. HTML responses use an
+HTTP `Refresh` header to reload every five seconds after loading, including error
+pages. Its explicit URL comes from the request URI, which excludes browser
+fragments and prevents an in-page navigation from replacing the metadata fetch.
+The CLI owns process signals and
 readiness reporting; the UI server owns rendering and HTTP responses.
 
 Rocket's HTML responder wraps a small embedded page shell and directly rendered,
-escaped status and table content. The stylesheet is also embedded. This single
-view needs no template-engine dependency, frontend build, runtime asset files,
+escaped status and table content. The private [renderer](src/admin/render.rs)
+owns the page shell, markup, escaping, and metric formatting; the
+[admin server](src/admin/mod.rs) owns metadata requests, HTTP status codes,
+response headers, and listener lifecycle. Application table rendering is split
+into collection and row functions to keep retained-storage handling separate
+from page orchestration. The stylesheet is also embedded. The overview
+and linked handler detail pages need no template-engine dependency, frontend build, runtime asset files,
 or separate browser API. Exact behavior lives in the
 [admin reference](docs/reference.md#admin-ui).
 

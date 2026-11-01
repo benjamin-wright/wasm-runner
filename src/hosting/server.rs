@@ -8,7 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -66,6 +66,7 @@ pub(super) struct RegisteredHandler {
     pub(super) name: String,
     pub(super) module: Arc<ModuleId>,
     pub(super) runtime: Arc<Runtime>,
+    pub(super) metrics: Arc<super::metrics::Metrics>,
 }
 
 /// Prepare and serve components inside a Tokio runtime. Rocket validates route
@@ -268,12 +269,16 @@ async fn read_body(data: Data<'_>, config: &Config) -> Result<Vec<u8>, Status> {
 #[rocket::async_trait]
 impl rocket::route::Handler for RegisteredHandler {
     async fn handle<'r>(&self, request: &'r HttpRequest<'_>, data: Data<'r>) -> Outcome<'r> {
+        let started = Instant::now();
         let state = request
             .rocket()
             .state::<Arc<State>>()
             .expect("server state")
             .clone();
-        Outcome::Success(dispatch(request, data, state, self.clone()).await)
+        let response = dispatch(request, data, state, self.clone()).await;
+        let latency = started.elapsed();
+        self.metrics.record(latency, response.status().code);
+        Outcome::Success(response)
     }
 }
 

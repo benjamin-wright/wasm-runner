@@ -309,6 +309,11 @@ Open the printed `Admin UI listening on http://...` URL in a browser. The page
 shows the daemon PID, hosting address, and application names and path prefixes.
 Each application's Functions column lists deployed function names, HTTP methods,
 and paths relative to that application's prefix.
+It also shows minimum and maximum handler latency. Follow a function's name to
+see its call count, latency summary, and response code counts, then use
+Applications to return. These are recent measurements for the current
+deployment; see [handler metrics](reference.md#handler-metrics) for the window
+and reset rules.
 The page refreshes automatically after deploying, replacing, or removing an
 application. An empty daemon is shown as having no deployed applications.
 

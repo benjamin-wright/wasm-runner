@@ -1,13 +1,10 @@
-use std::{
-    collections::BTreeMap, fmt::Write, future::Future, net::SocketAddr, path::PathBuf,
-    time::Duration,
-};
+use std::{future::Future, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use rocket::{
     State,
     fairing::AdHoc,
-    http::Status,
+    http::{ContentType, Status},
     response::content::{RawCss, RawHtml},
 };
 
@@ -16,155 +13,76 @@ use crate::control::{
     protocol::{Reply, Request},
 };
 
-const PAGE_TEMPLATE: &str = include_str!("page.html");
+mod render;
+
 const STYLESHEET: &str = include_str!("style.css");
 const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[rocket::get("/")]
 async fn index(socket: &State<PathBuf>) -> (Status, RawHtml<String>) {
-    let result = tokio::time::timeout(
-        METADATA_TIMEOUT,
-        client::request_async(socket, Request::Status),
-    )
-    .await
-    .context("daemon metadata request timed out after five seconds")
-    .and_then(|result| result);
-
-    let mut content = String::new();
-    let status = match result {
+    match metadata(socket).await {
         Ok(Reply::Status {
             pid,
             listen,
             applications,
             storage,
-        }) => {
-            write!(
-                content,
-                r#"<section id="daemon">
-  <h2>Daemon</h2>
-  <dl>
-    <div><dt>Status</dt><dd>Running</dd></div>
-    <div><dt>Process ID</dt><dd>{pid}</dd></div>
-    <div><dt>Hosting address</dt><dd><code>http://{listen}</code></dd></div>
-  </dl>"#,
-            )
-            .unwrap();
-            render_database(&mut content, &storage);
-            content.push_str("</section>");
-
-            let mut owners = BTreeMap::new();
-            for application in &applications {
-                owners.insert(application.name.as_str(), (Some(application), None));
-            }
-            for store in &storage.keyspaces {
-                owners.entry(store.name.as_str()).or_insert((None, None)).1 = Some(store);
-            }
-            write!(content, "<section id=\"applications\"><h2>Applications <span class=\"count\">{}</span></h2>", owners.len()).unwrap();
-            if owners.is_empty() {
-                content.push_str("<p class=\"empty\">No deployed applications.</p>");
-            } else {
-                content.push_str(
-                    r#"<div class="application-table"><table>
-  <caption class="visually-hidden">Applications, deployment status, routes, and keyspace file sizes</caption>
-  <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Path prefix</th><th scope="col" class="functions-column">Functions</th><th scope="col">Keyspace file bytes</th></tr></thead>"#,
-                );
-                for (name, (application, store)) in owners {
-                    let status = if application.is_some() {
-                        "Enabled"
-                    } else {
-                        "Disabled"
-                    };
-                    write!(content, "<tbody data-application=\"{}\"><tr><th scope=\"row\">{}</th><td><span class=\"status {}\">{status}</span></td>", escape(name), escape(name), status.to_ascii_lowercase()).unwrap();
-                    if let Some(application) = application {
-                        write!(
-                            content,
-                            "<td><code>{}</code></td><td><ul class=\"functions\">",
-                            escape(&application.path_prefix)
-                        )
-                        .unwrap();
-                        for function in &application.functions {
-                            write!(content, "<li><strong>{}</strong><span><code>{}</code> <code>{}</code></span></li>", escape(&function.name), escape(&function.method), escape(&function.path)).unwrap();
-                        }
-                        content.push_str("</ul></td>");
-                    } else {
-                        content.push_str("<td>—</td><td>—</td>");
-                    }
-                    let file_bytes = if application.is_some_and(|application| !application.kv) {
-                        "—".to_owned()
-                    } else {
-                        store
-                            .and_then(|store| store.disk_bytes)
-                            .map(|bytes| bytes.to_string())
-                            .unwrap_or_else(|| "Unavailable".to_owned())
-                    };
-                    write!(
-                        content,
-                        "<td class=\"keyspace-bytes\">{file_bytes}</td></tr></tbody>"
-                    )
-                    .unwrap();
-                }
-                content.push_str("</table></div>");
-            }
-            content.push_str("</section>");
-            Status::Ok
-        }
-        result => {
-            let message = match result {
-                Err(error) => format!("{error:#}"),
-                Ok(_) => "Unexpected response to daemon status request".to_owned(),
-            };
-            write!(
-                content,
-                r#"<section class="error" role="alert">
-  <h2>Daemon metadata unavailable</h2>
-  <p>{}</p>
-  <p>Check that the selected daemon is running.</p>
-</section>"#,
-                escape(&message)
-            )
-            .unwrap();
-            Status::ServiceUnavailable
-        }
-    };
-    (
-        status,
-        RawHtml(PAGE_TEMPLATE.replace("<!-- content -->", &content)),
-    )
+        }) => (
+            Status::Ok,
+            RawHtml(render::overview(pid, listen, &applications, &storage)),
+        ),
+        result => metadata_error(result),
+    }
 }
 
-fn render_database(content: &mut String, storage: &crate::persistence::StorageInfo) {
-    content.push_str("<h3>KV storage</h3>");
-    if !storage.opened {
-        content.push_str("<p class=\"empty\">Not initialized.</p>");
-        return;
-    }
-    let number = |value: Option<u64>| {
-        value
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "Unavailable".into())
+#[rocket::get("/applications/<application>/handlers/<handler>")]
+async fn handler_metrics(
+    socket: &State<PathBuf>,
+    application: &str,
+    handler: &str,
+) -> (Status, RawHtml<String>) {
+    let applications = match metadata(socket).await {
+        Ok(Reply::Status { applications, .. }) => applications,
+        result => return metadata_error(result),
     };
-    write!(content, "<dl><div><dt>Database disk bytes</dt><dd>{}</dd></div><div><dt>Journal fragments</dt><dd>{}</dd></div><div><dt>Storage errors</dt><dd>{}</dd></div></dl>",
-        number(storage.disk_bytes), number(storage.journal_count.map(|n| n as u64)), storage.storage_errors).unwrap();
+    let Some((app, function)) = applications
+        .iter()
+        .find(|app| app.name == application)
+        .and_then(|app| {
+            app.functions
+                .iter()
+                .find(|function| function.name == handler)
+                .map(|function| (app, function))
+        })
+    else {
+        return (Status::NotFound, RawHtml(render::missing_handler()));
+    };
+    (Status::Ok, RawHtml(render::handler(app, function)))
+}
+
+async fn metadata(socket: &State<PathBuf>) -> Result<Reply> {
+    tokio::time::timeout(
+        METADATA_TIMEOUT,
+        client::request_async(socket, Request::Status),
+    )
+    .await
+    .context("daemon metadata request timed out after five seconds")
+    .and_then(|result| result)
+}
+
+fn metadata_error(result: Result<Reply>) -> (Status, RawHtml<String>) {
+    let message = match result {
+        Err(error) => format!("{error:#}"),
+        Ok(_) => "Unexpected response to daemon status request".to_owned(),
+    };
+    (
+        Status::ServiceUnavailable,
+        RawHtml(render::unavailable(&message)),
+    )
 }
 
 #[rocket::get("/style.css")]
 fn stylesheet() -> RawCss<&'static str> {
     RawCss(STYLESHEET)
-}
-
-fn escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
 }
 
 pub(crate) async fn serve(
@@ -190,11 +108,15 @@ pub(crate) async fn serve(
         ..rocket::Config::default()
     })
     .manage(socket)
-    .mount("/", rocket::routes![index, stylesheet])
+    .mount("/", rocket::routes![index, handler_metrics, stylesheet])
     .attach(AdHoc::on_response(
         "Admin response headers",
-        |_, response| {
+        |request, response| {
             Box::pin(async move {
+                if response.content_type() == Some(ContentType::HTML) {
+                    // A fragment-only refresh can navigate without fetching fresh metadata.
+                    response.set_raw_header("Refresh", format!("5;url={}", request.uri()));
+                }
                 response.set_raw_header("Cache-Control", "no-store");
                 response.set_raw_header(
                     "Content-Security-Policy",

@@ -82,6 +82,13 @@ Observable acceptance conditions:
 - Pages show the daemon's PID and hosting address, and deployed application
   names and path prefixes in a stable order. Each application lists its deployed
   functions by name, with HTTP methods and application-relative route paths.
+  Each function headlines rolling minimum/maximum latency and links to its
+  own metrics page with completed call count, min/max/mean latency, and HTTP
+  response code counts. Empty windows show no latency measurement. Windows
+  expire during idle inspection and use bounded memory independent of traffic.
+  Metrics belong to active deployment generations: successful replacement
+  resets them, failed replacement preserves them, and removal/restart discards
+  them. Old-generation completions cannot affect new-generation metrics.
   Database-wide KV metrics appear under Daemon. KV-enabled applications show
   their keyspace file size in a column; other per-keyspace metrics are omitted.
   Retained-only owners appear once, marked Disabled, with their file size.
@@ -91,6 +98,8 @@ Observable acceptance conditions:
   the UI. The browser refreshes every five seconds after a page load, including
   error pages, without a manual Refresh button. Inspection does not require application source directories or local
   build outputs.
+  Refresh fetches fresh metadata even after following the Applications fragment
+  link; fragment navigation must not substitute for a new page request.
 - An unavailable daemon or failed metadata request produces a clear error
   within a bounded time, rather than displaying stale data as current. A later
   page request can recover when the daemon becomes available.
@@ -103,8 +112,8 @@ Observable acceptance conditions:
   or its deployments.
 
 The initial UI provides inspection only. Browser-initiated deployment, removal,
-and daemon lifecycle changes, remote access, logs, and non-KV
-metrics are outside this requirement. The [admin reference](docs/reference.md#admin-ui)
+and daemon lifecycle changes, remote access, logs, and persistent metrics history
+are outside this requirement. The [admin reference](docs/reference.md#admin-ui)
 defines command options, page responses, and timeouts. Coverage in
 `admin_ui_reports_live_status_and_recovers` checks startup, metadata, errors,
 escaping, recovery, and independent shutdown; `admin_ui_cancels_stalled_metadata_requests`
@@ -113,6 +122,10 @@ component-build workflow checks live deployment, replacement, removal, root
 mounts, and independence from local build outputs. It also checks function
 names, ordering, methods, escaped dynamic paths, and metadata preservation on
 failed deployment and refresh after replacement or removal.
+Handler metrics coverage extends that workflow with empty windows, GET/HEAD
+counting, guest response codes, per-handler links, and generation resets; the KV
+component workflow checks trap and timeout response counts. The metrics window
+test checks aggregation, boundary expiry, and idle recovery without sleeping.
 
 ## Persistent application KV
 

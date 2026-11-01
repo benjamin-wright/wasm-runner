@@ -4,6 +4,23 @@ Apply these instructions when planning, implementing, testing, and reviewing
 changes. Treat preferences as defaults; explain material tradeoffs that require
 a departure. Keep the work within the user's requested scope.
 
+## Priorities
+
+The task you're being asked to complete is always your SECOND priority. Your FIRST
+priority is ALWAYS the long-term health of the code base. As such you should carry
+out all work in two phases:
+
+### Phase 1: Correctness
+
+Implement the requested functionality, satisfy the requirements and establish
+appropriate tests
+
+### Phase 2: Maintainabilitiry
+
+Review the affected code for excessive responsibilites, nesting, unnecessary comments,
+duplication and avoidable abstractions. Refactor where it meaningfully improves
+clarity, then rerun the relevant tests.
+
 ## Working Process
 
 Avoid interacting with Git directly, trust the user to have set up the environment
