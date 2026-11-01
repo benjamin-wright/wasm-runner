@@ -1,0 +1,26 @@
+package local:http@0.2.0;
+
+interface handler {
+    record request {
+        method: string,
+        path: string,
+        path-params: list<tuple<string, string>>,
+        query: list<tuple<string, list<string>>>,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    handle: func(request: request) -> response;
+}
+
+/// A function receives a complete request and returns a complete response.
+world http-function {
+    import local:kv/store@0.1.0;
+    export handler;
+}

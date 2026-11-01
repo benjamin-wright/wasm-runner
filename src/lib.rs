@@ -4,6 +4,7 @@ mod cli;
 mod control;
 mod daemon;
 mod hosting;
+mod identifier;
 pub mod persistence;
 mod project;
 pub mod runtime;

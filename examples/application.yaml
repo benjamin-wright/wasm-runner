@@ -1,8 +1,15 @@
 name: hello
 path-prefix: /demo
 kv: true
+sql:
+  enabled: true
 
 functions:
+  sql-greet:
+    http:
+      method: GET
+      path: /sql/hello
+
   counter:
     http:
       method: GET

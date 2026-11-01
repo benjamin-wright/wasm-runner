@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt::Write, net::SocketAddr};
 
 use crate::{
     hosting::applications::{ApplicationInfo, FunctionInfo},
-    persistence::{StorageInfo, StoreInfo},
+    persistence::{StorageInfo, StoreInfo, sql::SqlInfo},
 };
 
 const PAGE_TEMPLATE: &str = include_str!("page.html");
@@ -12,6 +12,7 @@ pub(super) fn overview(
     listen: SocketAddr,
     applications: &[ApplicationInfo],
     storage: &StorageInfo,
+    sql: &[SqlInfo],
 ) -> String {
     let mut content = String::new();
     write!(
@@ -28,7 +29,7 @@ pub(super) fn overview(
     render_database(&mut content, storage);
     content.push_str("</section>");
 
-    render_applications(&mut content, applications, storage);
+    render_applications(&mut content, applications, storage, sql);
     page(&content)
 }
 
@@ -36,13 +37,23 @@ fn render_applications(
     content: &mut String,
     applications: &[ApplicationInfo],
     storage: &StorageInfo,
+    sql: &[SqlInfo],
 ) {
     let mut owners = BTreeMap::new();
     for application in applications {
-        owners.insert(application.name.as_str(), (Some(application), None));
+        owners.insert(application.name.as_str(), (Some(application), None, None));
     }
     for store in &storage.keyspaces {
-        owners.entry(store.name.as_str()).or_insert((None, None)).1 = Some(store);
+        owners
+            .entry(store.name.as_str())
+            .or_insert((None, None, None))
+            .1 = Some(store);
+    }
+    for database in sql {
+        owners
+            .entry(database.name.as_str())
+            .or_insert((None, None, None))
+            .2 = Some(database);
     }
     write!(content, r#"<section id="applications"><h2>Applications <span class="count">{}</span></h2><p class="metrics-note">Handler latency over the last five minutes.</p>"#, owners.len()).unwrap();
     if owners.is_empty() {
@@ -52,10 +63,10 @@ fn render_applications(
     content.push_str(
         r#"<div class="application-table"><table>
   <caption class="visually-hidden">Applications, deployment status, routes, and keyspace file sizes</caption>
-  <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Path prefix</th><th scope="col" class="functions-column">Functions</th><th scope="col">Keyspace file bytes</th></tr></thead>"#,
+  <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Path prefix</th><th scope="col" class="functions-column">Functions</th><th scope="col">Keyspace file bytes</th><th scope="col">SQL database</th></tr></thead>"#,
     );
-    for (name, (application, store)) in owners {
-        render_application(content, name, application, store);
+    for (name, (application, store, database)) in owners {
+        render_application(content, name, application, store, database);
     }
     content.push_str("</table></div></section>");
 }
@@ -65,6 +76,7 @@ fn render_application(
     name: &str,
     application: Option<&ApplicationInfo>,
     store: Option<&StoreInfo>,
+    sql: Option<&SqlInfo>,
 ) {
     let status = if application.is_some() {
         "Enabled"
@@ -98,11 +110,28 @@ fn render_application(
             .map(|bytes| bytes.to_string())
             .unwrap_or_else(|| "Unavailable".to_owned())
     };
-    write!(
-        content,
-        "<td class=\"keyspace-bytes\">{file_bytes}</td></tr></tbody>"
-    )
-    .unwrap();
+    write!(content, "<td class=\"keyspace-bytes\">{file_bytes}</td>").unwrap();
+    content.push_str("<td class=\"sql-database\">");
+    if let Some(sql) = sql {
+        let enabled = application.is_some_and(|app| app.sql);
+        let bytes = sql
+            .disk_bytes
+            .map(|bytes| bytes.to_string())
+            .unwrap_or_else(|| "Unavailable".into());
+        let failures: u64 = sql.operations.values().map(|stats| stats.failures).sum();
+        write!(
+            content,
+            "{} · Migration {} · {} bytes · {} failures",
+            if enabled { "Enabled" } else { "Disabled" },
+            sql.migration,
+            bytes,
+            failures
+        )
+        .unwrap();
+    } else {
+        content.push('—');
+    }
+    content.push_str("</td></tr></tbody>");
 }
 
 pub(super) fn handler(app: &ApplicationInfo, function: &FunctionInfo) -> String {

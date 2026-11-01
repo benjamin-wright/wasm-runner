@@ -71,17 +71,30 @@ starting if it requires unsupported capabilities.
 ## Application capabilities and limits
 
 Each request starts with fresh handler state. Globals do not persist between
-requests. Persistent values require the explicit KV capability. Handlers cannot
+requests. Persistent values require an explicit KV or SQL capability. Handlers cannot
 access host environment variables, command arguments, files, or the network.
 Printing from a handler does not produce application logs.
 
-Randomness, wall-clock time, and sleeping on timers are unsupported. SQL services
-and non-HTTP events are not implemented. Set top-level `kv: true`
+Randomness, wall-clock time, and sleeping on timers are unsupported. Non-HTTP events are not implemented. Set top-level `kv: true`
 to use generated `crate::kv::{get, set, delete, increment}`. Values are typed
 bytes, text, or signed 64-bit integers. Application names bind persistent
 keyspaces; accepted writes survive later guest failures. Increment is atomic.
-Neither streaming nor hot reload is provided. Do not propose outbound HTTP,
-direct file access, environment-based secrets, or database clients as working
+For SQL, set `sql: {enabled: true}` and use generated `crate::sql` statements
+with typed parameters. Query returns a cursor with `columns()` and `next()`;
+process rows incrementally and drop the cursor when finished. Up to four cursor
+resources may be held by one invocation. Readers come from a bounded pool and
+can coexist with queued writes using WAL snapshots. First-query acquisition
+waits use the invocation deadline; nested queries return `Limit` if the reader
+pool is full. An open cursor does not see writes committed after its snapshot.
+Atomic batches contain mutations. Keep schema changes in the fixed `migrations/`
+directory, with `NNNN-name.apply.sql` and optional paired `.rollback.sql` files.
+The host migrates after validating the candidate and before publication; retain
+applied files unchanged. An optional nested `migration-target` selects a forward
+or rollback target, with backward-compatible schemas required for overlapping
+generations. Omission never implicitly rolls back. SQL runs in the host; handlers
+do not need a database driver or migrations library. SQL 0.1.0 handlers must
+rebuild for the cursor API. HTTP response streaming and hot reload are not provided. Do not propose outbound HTTP,
+direct file access, environment-based secrets, or external database clients as working
 handler capabilities. Surface the missing capability
 when a requested application depends on one.
 

@@ -12,7 +12,12 @@ const GREET_FUNCTION: &str = include_str!("../examples/functions/greet.rs");
 const ECHO_FUNCTION: &str = include_str!("../examples/functions/echo.rs");
 const INSPECT_FUNCTION: &str = include_str!("../examples/functions/inspect.rs");
 const HTTP_WORLD: &str = include_str!("../wit/world.wit");
+const HTTP_KV_WORLD: &str = include_str!("fixtures/http-kv.wit");
 const HTTP_ONLY_WORLD: &str = include_str!("fixtures/http-only.wit");
+const SQL_GREETING_FUNCTION: &str = include_str!("../examples/functions/sql-greet.rs");
+const SQL_FUNCTION: &str = include_str!("fixtures/sql.rs");
+const SQL_APPLY: &str = include_str!("fixtures/0001-counters.apply.sql");
+const SQL_ROLLBACK: &str = include_str!("fixtures/0001-counters.rollback.sql");
 const KV_FUNCTION: &str = include_str!("fixtures/kv.rs");
 
 fn guest_request(path: &str) -> wasm_runner::runtime::Request {
@@ -26,15 +31,18 @@ fn guest_request(path: &str) -> wasm_runner::runtime::Request {
     }
 }
 
-fn exercise_kv(directory: &std::path::Path) {
+#[test]
+fn runtime_kv_isolates_calls_and_preserves_accepted_writes() {
     use std::{sync::Arc, time::Duration};
     use wasm_runner::{
         persistence::{KvValue, Storage},
         runtime::{ExecutionError, Runtime},
     };
-    let component = fs::read(directory.join(".wr/components/kv-test.wasm")).unwrap();
+    let fixture = ManifestFixture::new(EXAMPLE);
+    let directory = &fixture.directory;
+    let component = compiled_component("kv-test");
     let mut disabled = Runtime::new(Duration::from_secs(2)).unwrap();
-    let id = disabled.register(&component).unwrap();
+    let id = disabled.register(component).unwrap();
     assert_eq!(
         disabled
             .execute(&id, &guest_request("/disabled"))
@@ -47,7 +55,7 @@ fn exercise_kv(directory: &std::path::Path) {
     let storage = Storage::new(&root);
     let store = storage.application("hello").unwrap();
     let mut runtime = Runtime::with_store(Duration::from_secs(2), store.clone()).unwrap();
-    let id = runtime.register(&component).unwrap();
+    let id = runtime.register(component).unwrap();
     assert_eq!(
         runtime.execute(&id, &guest_request("/check")).unwrap().body,
         b"ok"
@@ -58,7 +66,7 @@ fn exercise_kv(directory: &std::path::Path) {
     ));
     assert_eq!(store.get("trap").unwrap(), Some(KvValue::Integer(1)));
     let mut short = Runtime::with_store(Duration::from_millis(100), store.clone()).unwrap();
-    let short_id = short.register(&component).unwrap();
+    let short_id = short.register(component).unwrap();
     assert!(matches!(
         short.execute(&short_id, &guest_request("/timeout")),
         Err(ExecutionError::Timeout)
@@ -70,7 +78,7 @@ fn exercise_kv(directory: &std::path::Path) {
         storage.application("hello").unwrap(),
     )
     .unwrap();
-    let replacement_id = replacement.register(&component).unwrap();
+    let replacement_id = replacement.register(component).unwrap();
     let runtime = Arc::new(runtime);
     let handles: Vec<_> = (0..8)
         .map(|_| {
@@ -105,57 +113,73 @@ fn exercise_kv(directory: &std::path::Path) {
         Some(KvValue::Integer(9))
     );
     drop(storage);
-    #[cfg(unix)]
-    exercise_kv_daemon(&component);
+}
 
-    // Compile the frozen pre-KV world, then register the resulting real component.
-    let world = directory.join(".wr/wit/world.wit");
-    let entry = directory.join(".wr/functions/greet/lib.rs");
-    let original = fs::read_to_string(&entry).unwrap();
-    fs::write(&world, HTTP_ONLY_WORLD).unwrap();
-    fs::write(
-        &entry,
-        original.replace("pub use local::kv::store as kv;\n", ""),
-    )
-    .unwrap();
-    let output = Command::new("cargo")
-        .current_dir(directory)
-        .args([
-            "build",
-            "--locked",
-            "--target",
-            "wasm32-wasip2",
-            "-p",
-            "wr-function-greet",
-        ])
-        .env("CARGO_TARGET_DIR", directory.join("target"))
-        .output()
-        .unwrap();
-    fs::write(world, HTTP_WORLD).unwrap();
-    fs::write(entry, original).unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let old =
-        fs::read(directory.join("target/wasm32-wasip2/debug/wr_function_greet.wasm")).unwrap();
-    let id = disabled.register(&old).unwrap();
-    assert_eq!(
-        disabled.execute(&id, &guest_request("/")).unwrap().body,
-        b"Hello, world!"
-    );
+#[test]
+fn runtime_accepts_pre_sql_components() {
+    use std::time::Duration;
+    use wasm_runner::runtime::Runtime;
+
+    for (world, source, request, expected) in [
+        (HTTP_ONLY_WORLD, GREET_FUNCTION, "/", "Hello, world!"),
+        (HTTP_KV_WORLD, KV_FUNCTION, "/disabled", "disabled"),
+    ] {
+        let fixture = ManifestFixture::new(EXAMPLE);
+        let directory = &fixture.directory;
+        let output = wr(&["update", directory.to_str().unwrap()]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::write(directory.join(".wr/wit/world.wit"), world).unwrap();
+        fs::write(directory.join("functions/greet.rs"), source).unwrap();
+        let entry = directory.join(".wr/functions/greet/lib.rs");
+        let mut original = fs::read_to_string(&entry)
+            .unwrap()
+            .replace("pub use local::sql::database as sql;\n", "");
+        if world == HTTP_ONLY_WORLD {
+            original = original.replace("pub use local::kv::store as kv;\n", "");
+        }
+        fs::write(entry, original).unwrap();
+        let output = Command::new("cargo")
+            .current_dir(directory)
+            .args([
+                "build",
+                "--locked",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                "wr-function-greet",
+            ])
+            .env("CARGO_TARGET_DIR", directory.join("target"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let old =
+            fs::read(directory.join("target/wasm32-wasip2/debug/wr_function_greet.wasm")).unwrap();
+        let mut runtime = Runtime::new(Duration::from_secs(2)).unwrap();
+        let id = runtime.register(&old).unwrap();
+        assert_eq!(
+            runtime.execute(&id, &guest_request(request)).unwrap().body,
+            expected.as_bytes()
+        );
+    }
 }
 
 #[cfg(unix)]
-fn exercise_kv_daemon(component: &[u8]) {
+#[test]
+fn daemon_kv_preserves_data_and_reports_live_metrics() {
+    let component = compiled_component("kv-test");
     let source = "name: first\npath-prefix: /one\nkv: true\nfunctions:\n  counter:\n    http:\n      method: GET\n      path: /<path..>\n";
     let first = ManifestFixture::new(source);
     let second = ManifestFixture::new(&source.replace("first", "second").replace("/one", "/two"));
     for fixture in [&first, &second] {
-        let components = fixture.directory.join(".wr/components");
-        fs::create_dir_all(&components).unwrap();
-        fs::write(components.join("counter.wasm"), component).unwrap();
+        fixture.write_component("counter", component);
     }
     let daemon = DaemonFixture::new();
     let mut address = daemon.start();
@@ -310,14 +334,22 @@ fn exercise_kv_daemon(component: &[u8]) {
     daemon.success(&["deploy", first.directory.to_str().unwrap()]);
     assert!(http(&address, "GET", "/moved/").ends_with("7"));
     daemon.success(&["daemon", "stop"]);
-    // Cleanup preserves foreground data and never manages daemon storage.
-    assert_eq!(foreground_counter(&first), "1");
-    assert_eq!(foreground_counter(&first), "2");
-    let preserved = first.directory.join(".wr-data/keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn foreground_kv_survives_restart_and_clean() {
+    let application = ManifestFixture::new(
+        "name: first\npath-prefix: /moved\nkv: true\nfunctions:\n  counter:\n    http: {method: GET, path: '/<path..>'}\n",
+    );
+    application.write_component("counter", compiled_component("kv-test"));
+    assert_eq!(foreground_counter(&application), "1");
+    assert_eq!(foreground_counter(&application), "2");
+    let preserved = application.directory.join(".wr-data/keep");
     fs::create_dir_all(preserved.parent().unwrap()).unwrap();
     fs::write(&preserved, "data").unwrap();
     assert!(
-        wr(&["clean", first.directory.to_str().unwrap()])
+        wr(&["clean", application.directory.to_str().unwrap()])
             .status
             .success()
     );
@@ -332,6 +364,322 @@ fn admin_application<'a>(page: &'a str, name: &str) -> &'a str {
         .split("</tbody>")
         .next()
         .unwrap()
+}
+
+#[test]
+fn runtime_sql_checks_capabilities_and_preserves_committed_writes() {
+    use std::time::Duration;
+    use wasm_runner::{
+        persistence::sql::{Migration, SqlStorage},
+        runtime::{Capabilities, ExecutionError, Runtime},
+    };
+    let component = compiled_component("sql-test");
+    let fixture = ManifestFixture::new(EXAMPLE);
+    let storage = SqlStorage::new(
+        fs::canonicalize(&fixture.directory)
+            .unwrap()
+            .join(".wr-data/sql"),
+    );
+    let store = storage.application("first").unwrap();
+    store
+        .migrate(
+            &[Migration {
+                id: 1,
+                name: "counters".into(),
+                apply: SQL_APPLY.into(),
+                rollback: Some(SQL_ROLLBACK.into()),
+            }],
+            None,
+        )
+        .unwrap();
+    let mut disabled = Runtime::new(Duration::from_secs(2)).unwrap();
+    let id = disabled.register(component).unwrap();
+    assert_eq!(
+        disabled
+            .execute(&id, &guest_request("/disabled"))
+            .unwrap()
+            .body,
+        b"disabled"
+    );
+    let mut runtime = Runtime::with_capabilities(
+        Duration::from_millis(500),
+        Capabilities {
+            kv: None,
+            sql: Some(store.clone()),
+        },
+    )
+    .unwrap();
+    let id = runtime.register(component).unwrap();
+    let held_readers: Vec<_> = (0..15)
+        .map(|_| {
+            store
+                .query(
+                    &wasm_runner::persistence::sql::SqlStatement {
+                        sql: "SELECT 1 UNION ALL SELECT 2".into(),
+                        parameters: vec![],
+                    },
+                    std::time::Instant::now() + Duration::from_secs(10),
+                )
+                .ok()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        runtime
+            .execute(&id, &guest_request("/nested-limit"))
+            .unwrap()
+            .body,
+        b"ok"
+    );
+    drop(held_readers);
+
+    assert_eq!(
+        runtime.execute(&id, &guest_request("/check")).unwrap().body,
+        b"ok"
+    );
+    assert_eq!(
+        runtime.execute(&id, &guest_request("/scan")).unwrap().body,
+        b"5000"
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            runtime
+                .execute(&id, &guest_request("/cursor-limit"))
+                .unwrap()
+                .body,
+            b"ok"
+        );
+        assert!(matches!(
+            runtime.execute(&id, &guest_request("/cursor-trap")),
+            Err(ExecutionError::Guest(_))
+        ));
+    }
+    assert!(matches!(
+        runtime.execute(&id, &guest_request("/cursor-timeout")),
+        Err(ExecutionError::Timeout)
+    ));
+    assert_eq!(
+        runtime
+            .execute(&id, &guest_request("/cursor-limit"))
+            .unwrap()
+            .body,
+        b"ok"
+    );
+    assert_eq!(
+        runtime
+            .execute(&id, &guest_request("/cursor-write"))
+            .unwrap()
+            .body,
+        b"0"
+    );
+    assert!(matches!(
+        runtime.execute(&id, &guest_request("/trap")),
+        Err(ExecutionError::Guest(_))
+    ));
+    assert_eq!(
+        runtime.execute(&id, &guest_request("/read")).unwrap().body,
+        b"2"
+    );
+    assert!(matches!(
+        runtime.execute(&id, &guest_request("/timeout")),
+        Err(ExecutionError::Timeout)
+    ));
+    assert_eq!(
+        runtime.execute(&id, &guest_request("/read")).unwrap().body,
+        b"2"
+    );
+}
+
+fn write_sql_migrations(fixture: &ManifestFixture) {
+    let directory = fixture.directory.join("migrations");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("0001-counters.apply.sql"), SQL_APPLY).unwrap();
+    fs::write(directory.join("0001-counters.rollback.sql"), SQL_ROLLBACK).unwrap();
+}
+
+#[test]
+fn migration_packaging_rejects_invalid_files_without_opening_storage() {
+    let source = format!("{EXAMPLE}\nsql: {{enabled: true}}\n");
+    for (filename, contents) in [
+        ("1-short.apply.sql", "SELECT 1;"),
+        ("0002-orphan.rollback.sql", "SELECT 1;"),
+        ("0001-different.rollback.sql", "SELECT 1;"),
+        ("00001-counters.apply.sql", "SELECT 1;"),
+        ("0002-empty.apply.sql", "  \n"),
+        ("readme.txt", "SELECT 1;"),
+    ] {
+        let fixture = ManifestFixture::new(&source);
+        for name in ["greet", "echo"] {
+            fixture.write_component(name, b"not reached");
+        }
+        write_sql_migrations(&fixture);
+        fs::write(
+            fixture.directory.join("migrations").join(filename),
+            contents,
+        )
+        .unwrap();
+        let output = wr(&[
+            "run",
+            fixture.directory.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+        ]);
+        assert!(!output.status.success(), "accepted {filename}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !error.contains("registering handler"),
+            "packaging must fail before component preparation: {error}"
+        );
+        assert!(!fixture.directory.join(".wr-data").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn sql_deployment_validates_before_migrating_and_preserves_history() {
+    let source = "name: first\npath-prefix: /one\nsql: {enabled: true}\nfunctions:\n  counter:\n    http: {method: GET, path: '/<path..>'}\n";
+    let first = ManifestFixture::new(source);
+    first.write_component("counter", compiled_component("sql-test"));
+    write_sql_migrations(&first);
+    let daemon = DaemonFixture::new();
+    let mut address = daemon.start();
+    fs::write(
+        &first.path,
+        source.replace("enabled: true", "enabled: false"),
+    )
+    .unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(!daemon.directory.join("d/sql").exists());
+    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
+    fs::write(&first.path, source).unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/one/").ends_with('1'));
+
+    let migrations = first.directory.join("migrations");
+    fs::write(
+        migrations.join("0002-note.apply.sql"),
+        "ALTER TABLE counters ADD COLUMN note TEXT;",
+    )
+    .unwrap();
+    fs::write(
+        migrations.join("0002-note.rollback.sql"),
+        "ALTER TABLE counters DROP COLUMN note;",
+    )
+    .unwrap();
+    first.write_component("counter", b"invalid component");
+    assert!(
+        !daemon
+            .call(&["deploy", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
+    first.write_component("counter", compiled_component("sql-test"));
+
+    let second = ManifestFixture::new(&source.replace("first", "second").replace("/one", "/two"));
+    second.write_component("counter", compiled_component("sql-test"));
+    write_sql_migrations(&second);
+    daemon.success(&["deploy", second.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/two/read").ends_with('0'));
+    fs::write(&first.path, source.replace("/one", "/two")).unwrap();
+    assert!(
+        !daemon
+            .call(&["deploy", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
+    fs::write(&first.path, source).unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/one/schema").ends_with("id,value,note"));
+
+    let rollback = source.replace("enabled: true", "enabled: true, migration-target: 1");
+    fs::write(&first.path, &rollback).unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
+    fs::write(
+        migrations.join("0001-counters.apply.sql"),
+        format!("{SQL_APPLY}\n"),
+    )
+    .unwrap();
+    assert!(
+        !daemon
+            .call(&["deploy", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    fs::write(migrations.join("0001-counters.apply.sql"), SQL_APPLY).unwrap();
+    fs::write(
+        migrations.join("0003-broken.apply.sql"),
+        "ALTER TABLE counters ADD COLUMN broken TEXT; SELECT missing FROM absent;",
+    )
+    .unwrap();
+    fs::write(&first.path, source).unwrap();
+    assert!(
+        !daemon
+            .call(&["deploy", first.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        http(&address, "GET", "/one/schema").ends_with("id,value"),
+        "whole transition is rolled back"
+    );
+    fs::remove_file(migrations.join("0003-broken.apply.sql")).unwrap();
+    fs::write(&first.path, &rollback).unwrap();
+
+    let admin = AdminFixture::start(&daemon.directory.join("d"));
+    assert!(admin_application(&admin.page(), "first").contains("Migration 1"));
+    assert!(
+        daemon
+            .success(&["daemon", "status"])
+            .contains("\"migration\":1")
+    );
+    daemon.success(&["remove", "first"]);
+    assert!(admin_application(&admin.page(), "first").contains("Disabled · Migration 1"));
+    daemon.success(&["daemon", "stop"]);
+    address = daemon.start();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/one/read").ends_with('1'));
+    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
+    assert!(admin_application(&admin.page(), "second").contains("Disabled · Migration 1"));
+    fs::write(
+        &first.path,
+        source.replace("enabled: true", "enabled: false"),
+    )
+    .unwrap();
+    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
+    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
+    daemon.success(&["daemon", "stop"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn foreground_sql_migrates_and_preserves_data_across_restart_and_clean() {
+    let application = ManifestFixture::new(
+        "name: first\npath-prefix: /moved\nsql: {enabled: true}\nfunctions:\n  counter:\n    http: {method: GET, path: '/<path..>'}\n",
+    );
+    application.write_component("counter", compiled_component("sql-test"));
+    write_sql_migrations(&application);
+    assert_eq!(foreground_counter(&application), "1");
+    assert_eq!(foreground_counter(&application), "2");
+    assert!(
+        wr(&["clean", application.directory.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        application
+            .directory
+            .join(".wr-data/sql/first/data.sqlite")
+            .exists()
+    );
+    assert!(
+        application
+            .directory
+            .join("migrations/0001-counters.apply.sql")
+            .exists()
+    );
 }
 
 #[cfg(unix)]
@@ -421,6 +769,13 @@ impl ManifestFixture {
         Self { directory, path }
     }
 
+    #[cfg(unix)]
+    fn write_component(&self, name: &str, bytes: &[u8]) {
+        let directory = self.directory.join(".wr/components");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(format!("{name}.wasm")), bytes).unwrap();
+    }
+
     fn run(&self, arguments: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_wr"))
             .current_dir(self.directory.parent().unwrap())
@@ -447,6 +802,77 @@ impl Drop for ManifestFixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.directory).unwrap();
     }
+}
+
+fn source_application() -> ManifestFixture {
+    let fixture = ManifestFixture::new(&format!("{EXAMPLE}\ndependencies:\n  serde_json: '1.0'\n"));
+    fs::write(fixture.directory.join("functions/echo.rs"), ECHO_FUNCTION).unwrap();
+    fs::write(
+        fixture.directory.join("functions/inspect.rs"),
+        INSPECT_FUNCTION,
+    )
+    .unwrap();
+    fs::write(
+        fixture.directory.join("functions/unlisted-target.rs"),
+        GREET_FUNCTION,
+    )
+    .unwrap();
+    fs::write(fixture.directory.join("functions/kv-test.rs"), KV_FUNCTION).unwrap();
+    fs::write(
+        fixture.directory.join("functions/sql-test.rs"),
+        SQL_FUNCTION,
+    )
+    .unwrap();
+    fs::write(
+        fixture.directory.join("functions/sql-greet.rs"),
+        SQL_GREETING_FUNCTION,
+    )
+    .unwrap();
+
+    fixture
+}
+
+#[cfg(unix)]
+fn mounted_application(source: &str) -> ManifestFixture {
+    let application = ManifestFixture::new(source);
+    for (name, component) in [
+        ("greet", "greet"),
+        ("root", "greet"),
+        ("inspect", "inspect"),
+        ("files", "inspect"),
+        ("echo", "echo"),
+    ] {
+        application.write_component(name, compiled_component(component));
+    }
+    application
+}
+
+fn compiled_component(name: &str) -> &'static [u8] {
+    use std::{collections::BTreeMap, sync::OnceLock};
+
+    static COMPONENTS: OnceLock<BTreeMap<String, Vec<u8>>> = OnceLock::new();
+    let components = COMPONENTS.get_or_init(|| {
+        let fixture = source_application();
+        let output = fixture.build(&["--unlocked"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ["greet", "echo", "inspect", "kv-test", "sql-test"]
+            .into_iter()
+            .map(|name| {
+                let bytes = fs::read(
+                    fixture
+                        .directory
+                        .join(format!(".wr/components/{name}.wasm")),
+                )
+                .unwrap();
+                (name.to_owned(), bytes)
+            })
+            .collect()
+    });
+    &components[name]
 }
 
 fn wr(arguments: &[&str]) -> Output {
@@ -975,6 +1401,19 @@ fn invalid_manifests_fail_before_printing_metadata() {
     let cases = [
         (format!("{EXAMPLE}\nkv: 'true'\n"), &["/kv"][..]),
         (format!("{EXAMPLE}\nkv: 1\n"), &["/kv"][..]),
+        (format!("{EXAMPLE}\nsql: true\n"), &["/sql"][..]),
+        (
+            format!("{EXAMPLE}\nsql: {{enabled: false, migration-target: 1}}\n"),
+            &["/sql"][..],
+        ),
+        (
+            format!("{EXAMPLE}\nsql: {{migration-target: 1}}\n"),
+            &["/sql"][..],
+        ),
+        (
+            format!("{EXAMPLE}\nsql: {{enabled: true, migration-target: -1}}\n"),
+            &["/sql"][..],
+        ),
         (
             EXAMPLE.replace("name: hello", "name: Invalid"),
             &["/name", "invalid"][..],
@@ -1153,19 +1592,7 @@ fn setup_discovers_all_direct_rust_sources_and_rejects_invalid_names() {
 
 #[test]
 fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
-    let fixture = ManifestFixture::new(&format!("{EXAMPLE}\ndependencies:\n  serde_json: '1.0'\n"));
-    fs::write(fixture.directory.join("functions/echo.rs"), ECHO_FUNCTION).unwrap();
-    fs::write(
-        fixture.directory.join("functions/inspect.rs"),
-        INSPECT_FUNCTION,
-    )
-    .unwrap();
-    fs::write(
-        fixture.directory.join("functions/unlisted-target.rs"),
-        GREET_FUNCTION,
-    )
-    .unwrap();
-    fs::write(fixture.directory.join("functions/kv-test.rs"), KV_FUNCTION).unwrap();
+    let fixture = source_application();
 
     let output = fixture.build(&[]);
     assert_eq!(output.status.code(), Some(1));
@@ -1244,11 +1671,6 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
             debug_artifact_time = Some(modified);
         }
     }
-
-    serve_built_examples(&fixture.directory);
-    #[cfg(unix)]
-    deploy_built_examples(&fixture.directory);
-    exercise_kv(&fixture.directory);
 
     let destination = fixture.directory.join(".wr/components/greet.wasm");
     let previous = fs::read(&destination).unwrap();
@@ -1350,7 +1772,8 @@ fn update_refreshes_dependencies_without_building() {
     );
 }
 
-fn serve_built_examples(directory: &std::path::Path) {
+#[test]
+fn http_serving_routes_requests_and_rejects_collisions() {
     use std::{
         io::{Read, Write},
         net::TcpStream,
@@ -1371,7 +1794,7 @@ fn serve_built_examples(directory: &std::path::Path) {
         name: name.into(),
         method: method.into(),
         path: path.into(),
-        component: fs::read(directory.join(format!(".wr/components/{name}.wasm"))).unwrap(),
+        component: compiled_component(name).to_vec(),
     })
     .collect();
     tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
@@ -1430,7 +1853,7 @@ fn serve_built_examples(directory: &std::path::Path) {
             name: path.into(),
             method: "GET".into(),
             path: path.into(),
-            component: fs::read(directory.join(".wr/components/greet.wasm")).unwrap(),
+            component: compiled_component("greet").to_vec(),
         }).collect();
         let error = server::serve(config, conflicting, std::future::pending(),
             |_| panic!("conflicting routes must fail before readiness")).await.unwrap_err();
@@ -1819,35 +2242,20 @@ fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
 }
 
 #[cfg(unix)]
-fn deploy_built_examples(directory: &std::path::Path) {
+#[test]
+fn deployment_replacement_preserves_routes_and_admin_metrics() {
     let daemon = DaemonFixture::new();
     let address = daemon.start();
     let mut admin = AdminFixture::start(&daemon.directory.join("d"));
-    let first = ManifestFixture::new(MOUNTED_APPLICATION);
-    let second = ManifestFixture::new(
+    let first = mounted_application(MOUNTED_APPLICATION);
+    let second = mounted_application(
         &MOUNTED_APPLICATION
             .replace("name: first", "name: second")
             .replace("/apps/one", "/apps/one-more"),
     );
     for application in [&first, &second] {
-        let components = application.directory.join(".wr/components");
-        fs::create_dir_all(&components).unwrap();
-        for (name, source) in [
-            ("greet", "greet"),
-            ("root", "greet"),
-            ("inspect", "inspect"),
-            ("files", "inspect"),
-            ("echo", "echo"),
-        ] {
-            fs::copy(
-                directory.join(format!(".wr/components/{source}.wasm")),
-                components.join(format!("{name}.wasm")),
-            )
-            .unwrap();
-        }
         daemon.success(&["deploy", application.directory.to_str().unwrap()]);
     }
-    serve_prefixed_foreground(&first);
     let page = admin.page();
     assert!(page.contains("/apps/one</code>"));
     assert!(page.contains("/apps/one-more</code>"));
@@ -1991,11 +2399,7 @@ fn deploy_built_examples(directory: &std::path::Path) {
         "failed deployment preserves function metadata and metrics"
     );
     assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
-    fs::copy(
-        directory.join(".wr/components/greet.wasm"),
-        first.directory.join(".wr/components/greet.wasm"),
-    )
-    .unwrap();
+    first.write_component("greet", compiled_component("greet"));
 
     // A small candidate keeps prefix-conflict checks from recompiling unrelated handlers.
     let greeting = "name: first\npath-prefix: /apps/one\nfunctions:\n  greet:\n    http: {method: GET, path: /hello}\n";
@@ -2166,7 +2570,9 @@ fn manifests_require_literal_canonical_path_prefixes() {
 }
 
 #[cfg(unix)]
-fn serve_prefixed_foreground(application: &ManifestFixture) {
+#[test]
+fn foreground_serving_honors_application_prefix() {
+    let application = mounted_application(MOUNTED_APPLICATION);
     use std::{
         io::{BufRead, BufReader},
         process::{Child, Stdio},

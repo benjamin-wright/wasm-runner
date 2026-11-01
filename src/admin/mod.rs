@@ -26,9 +26,10 @@ async fn index(socket: &State<PathBuf>) -> (Status, RawHtml<String>) {
             listen,
             applications,
             storage,
+            sql,
         }) => (
             Status::Ok,
-            RawHtml(render::overview(pid, listen, &applications, &storage)),
+            RawHtml(render::overview(pid, listen, &applications, &storage, &sql)),
         ),
         result => metadata_error(result),
     }

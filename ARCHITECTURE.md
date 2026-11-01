@@ -17,6 +17,7 @@ guest workspaces.
 | [main](src/main.rs) | Report errors and return the process exit status |
 | [CLI](src/cli/mod.rs) | Parse arguments and dispatch commands |
 | [Application commands](src/cli/application), [daemon commands](src/cli/daemon.rs), [application management](src/cli/apps.rs) | Command orchestration and presentation |
+| [Identifiers](src/identifier.rs) | Shared application/function name predicate for source discovery, control validation, and storage capabilities |
 | [Project](src/project) | Manifest validation, source discovery, workspace generation, Cargo invocation, and packaging existing component bytes |
 | [Daemon](src/daemon/mod.rs) | Compose the application registry and listeners; coordinate readiness and shutdown |
 | [Process lifecycle](src/daemon/process.rs) | Background launch, singleton lock, private state paths, readiness handshake, and cleanup |
@@ -27,7 +28,9 @@ guest workspaces.
 | [Hosting server](src/hosting/server.rs) | Translate HTTP, bound execution admission, and drain shutdown |
 | [Handler metrics](src/hosting/metrics.rs) | Aggregate bounded per-generation handler windows and produce snapshots |
 | [Runtime](src/runtime/mod.rs) | Compile components, own the engine/ticker, and invoke fresh isolated instances |
-| [Persistence](src/persistence/storage.rs) | Own the shared database, bind application keyspaces, validate typed operations, sync, and inspect |
+| [KV persistence](src/persistence/storage.rs) | Own the shared database, bind application keyspaces, validate typed operations, sync, and inspect |
+| [SQL persistence](src/persistence/sql) | Own application databases, restrict SQL execution, apply migration history, and inspect |
+| [Migration packaging](src/project/migrations.rs) | Discover named SQL files and produce validated deployment records |
 
 Project tooling knows files and Cargo; deployment transfers identity, the declared path prefix, routes,
 and bytes without source paths. Control handlers call application operations;
@@ -47,22 +50,32 @@ src/
   persistence/
     mod.rs
     storage.rs
+    paths.rs
+    sql/
+      mod.rs
+      connection.rs
+      access.rs
+      cursor.rs
+      migrations.rs
+      history.sql
   runtime/
     mod.rs
+    sql.rs
 ```
 
 [persistence/mod.rs](src/persistence/mod.rs) exposes the concrete `Storage` owner,
 `KvStore` capability, typed values/errors, and inspection records. Engine details
-remain private in [storage.rs](src/persistence/storage.rs). There is no provider
-trait, SQL module, or additional crate.
+remain private in [storage.rs](src/persistence/storage.rs). The concrete
+[SQL module](src/persistence/sql/mod.rs) owns separate SQLite
+databases; both engines share private path validation. There is no provider
+trait or additional crate.
 
 The runtime implementation lives in [runtime/mod.rs](src/runtime/mod.rs).
 The existing `pub mod runtime` declaration and public paths such as
-`wasm_runner::runtime::Runtime` remain unchanged. Keep the implementation
-together initially and introduce
-private child modules only when concrete responsibilities warrant a split.
-The runtime remains independent of HTTP hosting and uses the persistence
-capability supplied to it; it does not own storage-path selection.
+`wasm_runner::runtime::Runtime` remain unchanged. SQL guest conversion lives in
+a private child module; other runtime responsibilities remain together.
+The runtime remains independent of HTTP hosting and uses the concrete KV/SQL
+capabilities supplied to it; it does not own storage-path selection.
 
 ## Important flows
 
@@ -105,7 +118,10 @@ registry and replacing the application. Duplicate and ancestor/descendant
 prefixes are rejected. Shutdown checks use the same lock, so a late deployment
 cannot publish after admission closes. Old generations are dropped outside the
 lock. Independent application routers remove the need to rebuild a combined
-router or serialize asynchronous preparation across applications.
+router or serialize asynchronous preparation across applications. A separate publication
+mutex serializes migration/publication and removal after preparation; it never
+blocks HTTP registry reads. Prefix ownership is checked while holding that
+mutex before migration work starts, and shutdown is checked again at publication.
 
 The network listener selects an application using its literal, segment-bounded
 prefix, removes that prefix, and forwards the remaining encoded path and original
@@ -130,6 +146,10 @@ reference drops. Per-generation runtimes avoid changing the public runtime API,
 at the cost of an engine and ticker per deployed application generation. The
 public `server::serve` embedding API remains rooted at `/`; the foreground CLI
 uses the same registry and hosting path with the manifest's prefix.
+Its CLI entry point delegates to an asynchronous serving function; signal
+registration and periodic storage diagnostics have separate helpers. Signal
+listeners are registered before preparation, and diagnostics are polled alongside
+shutdown so inspection cannot delay signal handling. Storage sync follows draining.
 
 The daemon owns both listeners and shuts down the other if either fails. Its
 process-held file lock covers stale-socket cleanup through final shutdown; it
@@ -260,8 +280,9 @@ contexts limit the current host surface to the
 Each application dispatcher registers each configured URI directly as a Rocket route
 with its default rank. Rocket owns routing, method matching, collision detection, and
 slash handling. There is no parallel route ordering or overlap algorithm.
-The small capture adapter pairs names from the matched route with Rocket's
-decoded request segments for the WIT request. The encoded application-relative path comes from
+A private request adapter owns headers, query grouping, and pairing capture names
+from the matched route with Rocket's decoded request segments for the WIT request.
+Dispatch separately owns admission, blocking execution, and response/error mapping. The encoded application-relative path comes from
 Rocket's local request URI after prefix removal. The hosting listener's liftoff callback reports the actual bound address
 only after ignition and binding succeed.
 
@@ -380,8 +401,104 @@ periodically and are polled separately from shutdown signals, so a slow sample
 does not delay closing admission. Sync results and shared storage failures are
 logged without keys or values.
 
-Public storage tests exercise real temporary databases; CLI tests compile real
-KV and frozen HTTP-only components and cover runtime and daemon lifecycle.
+Public storage tests exercise real temporary databases. Independently named CLI
+tests cover building, HTTP dispatch, deployment/admin, runtime KV, daemon KV, and
+foreground hosting. Hosting tests compile their current components once per test
+process and share only immutable bytes; each workflow owns its mutable fixtures.
+Build verification and frozen HTTP-only compatibility use separate workspaces so
+mutations and assertions in those workflows cannot affect the shared components.
 See [requirements](SPEC.md#persistent-application-kv) and the
 [manual storage workflow](docs/guides.md#observe-kv-storage). No latency isolation
 or hard disk-stall bound is claimed.
+
+
+## SQL storage and deployment migrations
+
+Bundled SQLite supplies a separate database per application identity. Fjall
+remains the KV engine; there is no transaction spanning KV and SQL. `SqlStorage`
+selects and validates managed paths and lazily opens application handles.
+`SqlStore` retains one writer, a lazy read pool, its exclusive ownership file lock, current
+migration ID, and bounded operation statistics. As with KV, retained handles
+outlive removed generations and are discovered on the first SQL-enabled opening.
+An initialization mutex is separate from the handle-map lock; inspection clones
+handles before filesystem work and never waits for a query connection.
+
+The [connection module](src/persistence/sql/connection.rs) owns engine settings,
+authorization, input validation, and write-transaction cleanup. WAL permits read
+snapshots to coexist with the single queued writer. The
+[connection access module](src/persistence/sql/access.rs) leases the writer or a
+reader, opens readers lazily up to the fixed capacity, and uses a condition
+variable for deadline-aware acquisition. No pool mutex is held over SQLite I/O.
+Returned connections have their invocation hooks cleared; unhealthy connections
+are discarded. Waiting retains the existing bounded execution permits.
+
+The [cursor module](src/persistence/sql/cursor.rs) owns each read statement and
+its leased connection. Query prefetches at most one row to establish the snapshot;
+subsequent calls copy one row at a time. Column and per-row limits replace the
+previous accumulated-result limits. The cursor owns an application capability
+reference, keeping the database lock alive. Exhaustion, close, errors, and drop
+finalize the statement before returning the connection. A pool lease may move
+between execution threads but is never shared concurrently.
+
+Rusqlite's borrowed row iterator cannot be retained across independent guest
+calls. The cursor module therefore confines SQLite C statement preparation,
+binding, stepping, and finalization behind an owned wrapper. Its explicit Send
+implementation is justified by exclusive ownership of both statement and
+connection, which always move together; it is not Sync. Bound buffers are copied
+by SQLite and result buffers are copied before advancing the statement. Write
+execution and migration SQL continue to use rusqlite's ordinary APIs.
+
+The runtime binds `local:sql/database@0.2.0` independently of the HTTP export and
+KV import. A concrete `Capabilities` struct carries optional KV and SQL handles;
+existing constructors preserve their behavior. SQL WIT conversion belongs to a
+private runtime child module. Cursor resources live in the invocation's resource
+table and are destroyed even when guest code leaks a handle, traps, or times out.
+The resource limit bounds metadata as well as active readers. A nested query
+cannot wait for a full pool while retaining other cursor handles, avoiding
+cyclic waits between handlers. Exact limits live in the
+[SQL reference](docs/reference.md#sql-guest-operations-and-limits).
+
+Guests cannot choose database identities or paths. Parameterized execute and
+atomic mutation batches use the writer; queries always use read-only pool
+connections with the same authorization policy. Schema changes belong to
+migrations. SQL 0.1.0 components need rebuilding for the cursor interface;
+HTTP-only and KV compatibility is preserved.
+
+The [migration module](src/persistence/sql/migrations.rs) validates history and
+constructs the ordered apply/rollback plan. An embedded schema creates the
+runner-owned history table. SHA-256 hashes cover the exact UTF-8 bytes of each
+file, including optional rollback content. Rolled-back records remain immutable.
+The entire transition and history updates use one database transaction.
+Authorization is active only around application SQL; trusted history operations
+and transaction boundaries run outside that restricted scope. The SQLite binding
+requires mutable connection access to install/remove hooks, so the private
+transaction guard owns that access and rolls back on every uncommitted exit.
+Both forward and rollback SQL are restricted from history, external databases,
+engine configuration, and transaction control.
+
+Project packaging reads the fixed migration directory into bounded records.
+Those records travel in the existing control message alongside component bytes,
+without an archive or daemon access to source paths. Component compilation and
+Rocket route preparation happen first. Once the publication mutex is held, the
+registry validates prefix ownership, runs migrations on the blocking pool, and
+publishes the generation. The blocking migration job retains the mutex even if
+its awaiting future is cancelled. Registry read/write locks are never held over
+SQL I/O; other HTTP applications remain available. This serializes final control
+mutations across applications as a deliberate first-version simplicity tradeoff.
+
+A database commit and registry publication are not one atomic transaction.
+Failure between them can preserve the new schema with the old code. Existing
+generations also finish requests against the changed schema. Authors therefore
+own compatibility across every generation that may still run. Migration targets
+allow schema-first, code-first, or combined deployment without moving migration
+machinery into guest handlers. Exact behavior and limits belong to the
+[SQL reference](docs/reference.md#persistent-application-sql).
+
+Connections use FULL synchronous writer commits and WAL, so SQL needs no
+separate KV-style shutdown sync operation. SQLite owns automatic checkpointing;
+active read snapshots can retain WAL pages until their cursors close. Hosts drain preparation and
+executions before releasing handles. SQLite progress callbacks enforce elapsed
+query allowances; neither progress callbacks nor guest epochs can forcibly
+interrupt stalled native I/O. Status/admin report database migration state
+independently of the published generation, with retained owners and operation
+failures visible after removal.

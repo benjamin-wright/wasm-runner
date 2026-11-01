@@ -1,7 +1,8 @@
+use super::paths::prepare_directory;
 use std::{
     collections::BTreeMap,
     fmt, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -115,12 +116,7 @@ impl Storage {
 
     pub fn application(&self, name: &str) -> Result<Arc<KvStore>> {
         ensure!(
-            !name.is_empty()
-                && name.len() <= 64
-                && name.as_bytes()[0].is_ascii_lowercase()
-                && name
-                    .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'),
+            crate::identifier::is_valid(name),
             "invalid application name"
         );
         if let Some(store) = self.stores.read().expect("storage handles").get(name) {
@@ -354,52 +350,4 @@ fn decode(value: &[u8]) -> Result<KvValue, KvError> {
             .map_err(|_| KvError::Storage),
         _ => Err(KvError::Storage),
     }
-}
-
-fn prepare_directory(root: &Path) -> Result<()> {
-    // Validate each existing ancestor: create_dir_all otherwise follows symlinks.
-    for ancestor in root.ancestors() {
-        match fs::symlink_metadata(ancestor) {
-            Ok(metadata) => ensure!(
-                metadata.is_dir(),
-                "storage path must contain only directories: {}",
-                ancestor.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(root)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            fs::metadata(root)?.permissions().mode() & 0o077 == 0,
-            "storage directory must be private (mode 0700)"
-        );
-    }
-    validate_managed_paths(root)
-}
-
-fn validate_managed_paths(root: &Path) -> Result<()> {
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        ensure!(
-            kind.is_file() || kind.is_dir(),
-            "invalid managed storage path: {}",
-            entry.path().display()
-        );
-        if kind.is_dir() {
-            validate_managed_paths(&entry.path())?;
-        }
-    }
-    Ok(())
 }

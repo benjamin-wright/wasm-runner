@@ -36,6 +36,8 @@ pub(crate) struct ApplicationDefinition {
     #[serde(default)]
     pub kv: bool,
     #[serde(default)]
+    pub sql: crate::persistence::sql::SqlConfig,
+    #[serde(default)]
     pub dependencies: Dependencies,
     pub functions: HashMap<String, FunctionDefinition>,
 }

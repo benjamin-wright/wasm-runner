@@ -75,12 +75,14 @@ async fn connection(
                         application.path_prefix,
                         application.handlers,
                         application.kv,
+                        application.sql,
+                        application.migrations,
                     )
                     .await?;
                 Ok(Reply::Ok)
             }
             Request::Remove { name } => {
-                applications.remove(&name)?;
+                applications.remove(&name).await?;
                 Ok(Reply::Ok)
             }
             Request::List => Ok(Reply::Applications {
@@ -91,6 +93,7 @@ async fn connection(
                 listen,
                 applications: applications.list(),
                 storage: applications.storage_info().await?,
+                sql: applications.sql_info().await?,
             }),
             Request::Stop => {
                 applications.stop();

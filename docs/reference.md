@@ -38,6 +38,7 @@ Arguments after `wr` go directly to the application.
 
 An application has a name, a required `path-prefix`, and a nonempty map of named
 functions. Optional `kv: true` enables [persistent application storage](#persistent-application-kv);
+`sql: {enabled: true}` enables [SQL and deployment migrations](#persistent-application-sql);
 it defaults to false. Every configured function declares an HTTP method/path pair. See the complete
 [example manifest](../examples/application.yaml). Application and function names
 are lowercase identifiers of 1 to 64 letters, digits, or hyphens, starting with
@@ -174,7 +175,7 @@ All paths below are relative to the application directory.
 | `Cargo.toml` | Generated guest workspace root; protected against overwriting a handwritten manifest. |
 | `.wr/functions/<name>/Cargo.toml` | Generated `cdylib` package for each discovered source. |
 | `.wr/functions/<name>/lib.rs` | Generated entry point that includes the original source and exports the guest handler. |
-| `.wr/wit/world.wit`, `.wr/wit/deps/kv/store.wit` | Embedded HTTP and KV guest contracts. |
+| `.wr/wit/world.wit`, `.wr/wit/deps/kv/store.wit`, `.wr/wit/deps/sql/database.wit` | Embedded HTTP, KV, and SQL guest contracts. |
 | `.gitignore` | Existing contents preserved; required literal entries appended if missing. |
 | `.vscode/settings.json` | Existing settings merged with the source include path. |
 | `Cargo.lock` | Managed by Cargo during update or explicitly unlocked builds, not by setup; keep it in version control. |
@@ -255,8 +256,8 @@ a compilation failure.
 
 These are components exporting the [custom HTTP guest interface](../wit/README.md),
 not WASI HTTP. The target may introduce WASI imports. Build does not execute
-components or serve HTTP. KV capability enforcement belongs to the runtime.
-SQL and non-HTTP event handlers are unsupported.
+components or serve HTTP. KV and SQL capability enforcement belongs to the runtime.
+Non-HTTP event handlers are unsupported.
 
 ## Update
 
@@ -378,14 +379,14 @@ arguments, preopened directories, or network access is inherited. Stdin is
 closed; stdout and stderr are sinks; no terminals are available. Monotonic clock
 reads report time since invocation; timer subscriptions trap because native
 WASI waits cannot be interrupted by guest epochs. Filesystem, random, socket,
-wall-clock, and custom host interfaces other than the versioned KV import are unsupported.
+wall-clock, and custom host interfaces other than the versioned KV and SQL imports are unsupported.
 Unsupported imports and incompatible guest interfaces fail registration.
 The [guest contract](../wit/README.md#execution-and-compatibility) defines interface
 versioning and rebuild requirements.
 
 Epoch interruption cannot forcibly terminate arbitrary host code or undo
 external effects. Any future host I/O must honor the remaining execution
-deadline. Memory quotas, streaming, hot reload, SQL bindings, and custom
+deadline. Memory quotas, streaming, hot reload, and custom
 scheduling are outside this increment.
 
 ## Persistent application KV
@@ -486,8 +487,179 @@ attributable to one application. There are no independent performance/failure
 domains or runner-enforced application quotas. Engine buffering and backpressure
 remain enabled. No scans or mirror maps are used for exact live-size metrics.
 
-SQL, scans, TTL, compare-and-set, guest transactions, named stores, remote
+Scans, TTL, compare-and-set, guest transactions, named stores, remote
 backends, replication, online backup, and a data browser are outside this API.
+
+## Persistent application SQL
+
+The optional `sql` object requires a boolean `enabled` field. The only other
+field is `migration-target`, an optional integer from zero through 2^63 − 1.
+There is no boolean shorthand. Omitting `sql` disables SQL; setting a target
+while disabled is an error. Disabled applications neither load migration files
+nor open their SQL database. SQL and KV are independent capabilities.
+
+```yaml
+sql:
+  enabled: true
+  migration-target: 3
+```
+
+### Migration files and history
+
+Put UTF-8 SQL files directly in the application's `migrations/` directory.
+Names are `0001-description.apply.sql` and optionally
+`0001-description.rollback.sql`: at least four decimal digits, a hyphen, a
+normal lowercase identifier, then the suffix. IDs are positive, fit a signed
+64-bit integer, and are sorted numerically; gaps are permitted. Apply and rollback
+names must agree. Duplicate IDs for either direction, non-regular files, unknown
+filenames, empty files, and rollback files without an apply file are rejected.
+A missing directory means an empty migration list. Each file is limited to
+1 MiB; at most 1,000 migrations and 8 MiB of combined SQL text are accepted.
+
+Run and deploy load these files alongside existing components. Deploy sends
+structured migration records in its bounded control message, without source
+paths or an archive. Setup, build, and update do not execute migrations.
+
+The runner records each applied migration's ID, name, and separate SHA-256 hashes
+of exact apply/rollback bytes in a protected database table. Once applied, names
+and both files are immutable, including whitespace and line endings. Absence of
+a rollback file is also recorded. A rollback retains the history record and its
+hashes. Every deployment must include all recorded migrations, even ones already
+rolled back; missing or changed history fails before any migration SQL runs.
+New migrations cannot be inserted below the highest recorded ID.
+
+With no target, migrate forward to the highest supplied ID; omission never
+implicitly rolls back. An explicit target must name a supplied migration, or be
+zero for the empty schema. Apply in ascending order; roll back in descending
+order. A lower target requires rollback files for every step being undone.
+Missing scripts fail before the transition begins. Deploying an older checkout
+without newer history is not a rollback workflow: retain the migration files
+and explicitly lower the target.
+
+### SQL deployment and failures
+
+The host validates configuration, components, routes, prefix ownership, and
+migration history before executing user migration SQL. It may initialize an
+empty database and its internal history during preparation. The complete schema
+transition and history changes run in one transaction; failure rolls both back.
+Files must contain transaction-compatible SQL and must not manage transactions.
+The candidate generation is published only after a successful commit.
+
+Migrations and competing publications/removals are serialized. Existing HTTP
+requests continue against their retained generation. Authors must keep both
+forward and rollback changes compatible with every generation still executing.
+The runner cannot prove query/schema compatibility. Rollback SQL does not promise
+to recover deleted data. Migration direction and code rollout order remain the
+author's responsibility.
+
+A committed migration is not undone by a later publication failure, shutdown,
+lost response, or process failure. Foreground run can also commit migrations and
+then fail to bind its listener. Retrying validates history and skips committed
+steps. The migration allowance is 30 seconds, including waiting for the local
+connection; SQLite progress checks interrupt query work but cannot bound native
+filesystem stalls. Shutdown drains admitted preparation and execution work.
+
+### SQL guest operations and limits
+
+The [versioned SQL import](../wit/deps/sql/database.wit) is exposed as `crate::sql`.
+`query` prepares and starts one read-only statement, returning a cursor resource.
+The cursor's `columns` method returns column names; `next` returns one typed row
+or `none` at exhaustion. The host retains at most one prefetched row and never
+collects the whole result. `execute` runs one statement without returned columns
+and returns its affected row count.
+`batch` runs up to 100 such statements atomically and returns their individual
+counts. `RETURNING` is not supported by these initial operations. Each statement
+has positional parameters represented by null, signed integer, real, text, or
+bytes. Nonfinite real parameters are rejected. No string interpolation is needed.
+
+Schema changes are permitted only in migrations. Both guest and migration SQL
+are denied access to runner history, other databases, extension loading, virtual
+and temporary tables, PRAGMA settings, and explicit transaction/savepoint control.
+The `_wr_` name prefix is reserved. This is an application capability, not a
+filesystem path or connection-string API.
+
+SQL text is limited to 1 MiB per statement and across a guest batch. A statement
+accepts at most 256 parameters and 1 MiB of parameter payload. A cursor has at
+most 128 columns and 1 MiB of column-name metadata; each individual row is limited
+to 1 MiB of value payload, counting numeric and null values as eight bytes.
+There is no total row-count or accumulated result-size limit. Exceeding a row
+limit returns an error and releases the reader, never a truncated row. SQLite expression, statement-program, compound
+query, and trigger-depth limits also apply. These limits are not a total memory
+quota or a hard native-I/O deadline.
+
+Each application owns one queued writer connection and a lazy pool of up to 16
+read-only connections. Writers (including migrations) serialize; readers can run
+concurrently with each other and the writer through SQLite WAL mode. Each cursor
+retains a reader and a stable snapshot established during `query`. Writes made
+by the same handler or other requests do not change an open cursor's snapshot.
+A later query sees changes committed before its own snapshot starts.
+
+A guest may hold at most four cursor resources. Dropping a cursor releases it
+early; exhaustion or error releases the reader immediately, though the resource
+handle still counts toward the four-handle limit until dropped. All remaining
+cursors are destroyed on invocation return, trap, or timeout. Cursors cannot
+survive into another invocation. Call `drop(cursor)` when a handler no longer
+needs one. Repeated `next` calls on an exhausted cursor return `none`.
+
+The first query waits for a reader when the pool is full. If the guest already
+holds any cursor resource, a further query requires an immediately available
+reader or returns `limit`; it cannot wait while retaining resources that might
+be needed to unblock other nested queries. Writers and first-query reader waits
+consume the invocation's existing deadline. An expired waiter performs no SQL.
+Strict FIFO ordering is not guaranteed. Migration writer waits use their existing
+30-second allowance. Native embedders use the public reader-pool limit when
+planning nested queries; native `query` always waits within its supplied deadline.
+
+The host's execution slots remain held while waiting, so existing admission
+limits still apply. No guest call is replayed. `busy` remains available for
+SQLite-level lock conflicts outside this connection coordination.
+SQL progress checks use the invocation's remaining deadline and outer checks
+reject late returns. Accepted commits survive a later trap, timeout,
+or disconnect. A commit interrupted at the transport boundary can have an unknown
+outcome; retries require application-level idempotency.
+
+Typed errors are `disabled`, `invalid-statement`, `denied`, `constraint`, `busy`,
+`limit`, `timeout`, and `storage`. Guest errors do not expose host paths or SQL
+contents. The application chooses their HTTP mapping. Previously built HTTP-only
+and KV components remain compatible. The cursor contract is
+`local:sql/database@0.2.0`; components importing SQL 0.1.0 must be rebuilt and use
+cursor iteration. Upgrade CLI and daemon together.
+
+### SQL storage and inspection
+
+SQLite is bundled with the runner. Each application has a separate database at
+`<state-dir>/sql/<name>/data.sqlite` for the daemon, or
+`<application-directory>/.wr-data/sql/<name>/data.sqlite` for foreground run.
+The validated application name determines identity. Replacement, prefix changes,
+removal, disabling, and cleanup preserve data; renaming selects another database.
+Capabilities retain an exclusive ownership lock. Managed directories reject
+symlinks/special files and require private Unix permissions. Invalid or locked
+storage fails preparation rather than substituting empty data.
+
+Connections use WAL journaling, FULL synchronous writer commits, enabled foreign
+keys, and memory-backed temporary work. SQLite performs automatic checkpoints;
+long-lived read snapshots can delay checkpoint progress and retain WAL data.
+The invocation deadline and prompt cursor cleanup bound normal reader lifetimes;
+there is no hard disk-stall bound. Durability depends on the filesystem
+honoring SQLite's sync requests. There is no shared transaction with KV, online
+backup service, or distributed coordination. For offline backup, stop all users
+and copy the application's whole SQL directory.
+
+The first enabled SQL application discovers retained databases under its host
+root. Status inspection does not initialize unopened storage. Records show the
+current migration ID, optional combined database/WAL file size, and in-memory
+counts, failures, total time, and maximum time for each operation. `query` measures
+preparation, acquisition, and first-row prefetch; `next` measures each row advance.
+File size excludes the shared-memory index and does not estimate live row data. Statistics restart with the host;
+migration history persists. Admin shows active and retained owners together.
+
+Embedders use `persistence::sql::SqlStorage::new(root)`, obtain a capability through
+`application(name)`, and explicitly call `SqlStore::migrate` before exposing new
+code. `SqlStore::query` returns `SqlCursor`, whose `columns`, `next_row`, and
+`close` methods expose iteration and early release. The cursor keeps its database
+owner alive, and its supplied deadline covers the entire scan. `MAX_READ_CONNECTIONS`
+exports the pool capacity. `runtime::Capabilities` carries optional KV and SQL
+handles into `Runtime::with_capabilities`. Hosts own draining and capability lifetimes.
 
 ## Output and errors
 
@@ -530,7 +702,10 @@ Names present only in retained
 keyspaces also appear with their retained file size, marked Disabled with no active prefix or functions.
 Deployed applications are marked Enabled, independently of their KV capability.
 The application count includes both groups, each name appearing once.
-Metric definitions are in [KV inspection](#inspection-and-alpha-limits).
+The SQL column shows capability status, the database migration ID, database file
+bytes, and operation failures, including retained databases. SQL schema state is
+independent of the active generation. Metric definitions are in
+[KV inspection](#inspection-and-alpha-limits) and [SQL inspection](#sql-storage-and-inspection).
 Only deployed functions appear; source files without configured routes are not
 deployed. An empty registry is shown explicitly. The browser reloads the page
 five seconds after each load using an HTTP `Refresh` header, querying current metadata
@@ -631,7 +806,8 @@ and SIGTERM use the same shutdown path. Stopping an absent daemon fails.
 `deploy` loads the manifest and configured sources using the usual validation,
 then reads existing component files. It neither runs Cargo nor generates files.
 The control payload contains the manifest's application name, required
-`path-prefix`, the optional boolean `kv` flag (absent means false), named method/path routes, and component bytes; source paths and
+`path-prefix`, the optional boolean `kv` flag (absent means false), the SQL configuration
+and migration records, named method/path routes, and component bytes; source paths and
 build dependencies are not sent.
 The server independently validates names, methods, route syntax, component
 compatibility, internal route collisions, and prefix ownership. Application and
@@ -641,8 +817,10 @@ Application names are deployment identities: deploying an existing name replaces
 its complete prefix/route/component set, and renaming it creates another application.
 Function routes use Rocket ranking and collision rules within each application.
 Preparation, compilation, route validation, and prefix ownership checks finish
-before atomic publication. Failure leaves every active application unchanged. Concurrent
-changes are checked and published under the registry lock against the latest set.
+before SQL migrations and atomic publication. Failure leaves every active application
+generation unchanged; a committed SQL migration can survive a later publication
+failure. Publication and removal are serialized across migrations, with registry
+locks held only for metadata access. See [SQL deployment](#sql-deployment-and-failures).
 An acknowledged deployment is active for subsequent requests; a lost connection
 can leave its outcome unknown, so inspect/redeploy before assuming failure.
 
@@ -656,16 +834,20 @@ Deleting local build outputs does not affect deployed component bytes.
 The control transport uses one request and response per Unix connection. Each
 message is a four-byte big-endian byte length followed by UTF-8 JSON, capped at
 128 MiB including JSON encoding. The request's `command` is `deploy`, `remove`,
-`list`, `status`, or `stop`. Deploy includes `application: {name, path-prefix, kv, handlers}`, where
+`list`, `status`, or `stop`. Deploy includes `application: {name, path-prefix, kv, sql, migrations, handlers}`, where
 each handler contains `name`, `method`, `path`, and `component` (an array of byte
 values). Remove includes `name`. Responses use `result: ok`, `applications`
-(with `applications`), `status` (with `pid`, `listen`, `applications`, and `storage`), or `error`
+(with `applications`), `status` (with `pid`, `listen`, `applications`, `storage`, and `sql`), or `error`
 (with `message`). Both application lists contain objects with `name`,
-`path-prefix`, `kv`, and `functions` fields. `functions` is sorted by name and contains
+`path-prefix`, `kv`, `sql` (a boolean capability flag), and `functions` fields. `functions` is sorted by name and contains
 objects with `name`, `method`, and application-relative `path` from the active
 routes, plus `metrics`. The metrics object contains `window_seconds` (300),
 `calls`, `latency_min_ms`, `latency_max_ms`, `latency_mean_ms`, and
 `response_codes` (an object mapping numeric HTTP status strings to counts).
+SQL status is a separate `sql` list of retained application database records,
+with `name`, current `migration` ID, optional `disk_bytes`, and per-operation
+statistics. Deployment `sql` is the manifest object; each migration record contains
+`id`, `name`, `apply` text, and optional `rollback` text.
 See [handler metrics](#handler-metrics) for measurement and lifecycle semantics.
 Component bytes are not included in these metadata responses. CLI list
 displays application names and prefixes; status also displays storage metadata.

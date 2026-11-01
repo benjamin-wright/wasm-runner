@@ -1,5 +1,7 @@
-//! Persistent application-scoped key/value storage. Owners must explicitly sync
-//! after draining their users before releasing the database.
+//! Persistent application-scoped KV and SQL storage. Drain users before releasing
+//! capabilities; KV owners must also explicitly sync their database.
+mod paths;
+pub mod sql;
 mod storage;
 
 pub use storage::{

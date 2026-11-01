@@ -80,7 +80,14 @@ pub async fn serve(
 ) -> Result<()> {
     let applications = Applications::new(config.clone())?;
     applications
-        .install("application".into(), "/".into(), handlers, false)
+        .install(
+            "application".into(),
+            "/".into(),
+            handlers,
+            false,
+            Default::default(),
+            Vec::new(),
+        )
         .await?;
     serve_applications(config, applications, shutdown, on_ready).await
 }
@@ -98,7 +105,14 @@ pub async fn serve_with_storage(
     let applications = Applications::with_storage(config.clone(), Some(storage.clone()))?;
     let result = async {
         applications
-            .install("application".into(), "/".into(), handlers, true)
+            .install(
+                "application".into(),
+                "/".into(),
+                handlers,
+                true,
+                Default::default(),
+                Vec::new(),
+            )
             .await?;
         serve_applications(config, applications, shutdown, on_ready).await
     }
@@ -295,64 +309,7 @@ async fn dispatch(
         Ok(body) => body,
         Err(status) => return empty_response(status),
     };
-    let headers = request
-        .headers()
-        .iter()
-        .map(|header| (header.name().to_string(), header.value().to_owned()))
-        .collect();
-    let mut query: Vec<(String, Vec<String>)> = Vec::new();
-    let mut positions = HashMap::new();
-    let raw_query = request
-        .uri()
-        .query()
-        .map(|query| query.as_str())
-        .unwrap_or("");
-    for (key, value) in form_urlencoded::parse(raw_query.as_bytes()) {
-        let next = query.len();
-        let position = *positions.entry(key.to_string()).or_insert_with(|| {
-            query.push((key.to_string(), Vec::new()));
-            next
-        });
-        query[position].1.push(value.into_owned());
-    }
-    // Rocket owns matching and decoding. Only adapt its named captures to WIT;
-    // trailing captures are represented as decoded segments joined with '/'.
-    let mut path_params = Vec::new();
-    if let Some(route) = request.route() {
-        for (index, segment) in route
-            .uri
-            .origin
-            .path()
-            .raw_segments()
-            .filter(|s| !s.is_empty())
-            .enumerate()
-        {
-            if let Some(name) = segment.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
-                let (name, value) = if let Some(name) = name.strip_suffix("..") {
-                    (
-                        name,
-                        request
-                            .routed_segments(index..)
-                            .collect::<Vec<_>>()
-                            .join("/"),
-                    )
-                } else {
-                    (name, request.routed_segment(index).unwrap_or("").to_owned())
-                };
-                if name != "_" {
-                    path_params.push((name.to_string(), value));
-                }
-            }
-        }
-    }
-    let guest_request = Request {
-        method: request.method().to_string(),
-        path: request.uri().path().as_str().to_owned(),
-        path_params,
-        query,
-        headers,
-        body,
-    };
+    let guest_request = adapt_request(request, body);
     let Ok(slot) = state.slots.clone().try_acquire_owned() else {
         return empty_response(Status::ServiceUnavailable);
     };
@@ -386,6 +343,68 @@ async fn dispatch(
             eprintln!("handler {name}: blocking execution failed: {error}");
             empty_response(Status::InternalServerError)
         }
+    }
+}
+
+fn adapt_request(request: &HttpRequest<'_>, body: Vec<u8>) -> Request {
+    let headers = request
+        .headers()
+        .iter()
+        .map(|header| (header.name().to_string(), header.value().to_owned()))
+        .collect();
+    let mut query: Vec<(String, Vec<String>)> = Vec::new();
+    let mut positions = HashMap::new();
+    let raw_query = request
+        .uri()
+        .query()
+        .map(|query| query.as_str())
+        .unwrap_or("");
+    for (key, value) in form_urlencoded::parse(raw_query.as_bytes()) {
+        let next = query.len();
+        let position = *positions.entry(key.to_string()).or_insert_with(|| {
+            query.push((key.to_string(), Vec::new()));
+            next
+        });
+        query[position].1.push(value.into_owned());
+    }
+    // Rocket owns matching and decoding. Only adapt its named captures to WIT;
+    // trailing captures are represented as decoded segments joined with '/'.
+    let mut path_params = Vec::new();
+    if let Some(route) = request.route() {
+        for (index, segment) in route
+            .uri
+            .origin
+            .path()
+            .raw_segments()
+            .filter(|s| !s.is_empty())
+            .enumerate()
+        {
+            let Some(name) = segment.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
+                continue;
+            };
+            let (name, value) = if let Some(name) = name.strip_suffix("..") {
+                (
+                    name,
+                    request
+                        .routed_segments(index..)
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                )
+            } else {
+                (name, request.routed_segment(index).unwrap_or("").to_owned())
+            };
+            if name != "_" {
+                path_params.push((name.to_string(), value));
+            }
+        }
+    }
+    Request {
+        method: request.method().to_string(),
+        path: request.uri().path().as_str().to_owned(),
+        path_params,
+        query,
+        headers,
+        body,
     }
 }
 

@@ -10,10 +10,13 @@ pub(crate) fn deployment(
 ) -> Result<crate::control::protocol::Deployment> {
     let application = super::manifest::load(directory)?;
     let handlers = load_handlers(&application)?;
+    let migrations = super::migrations::load(directory, application.sql)?;
     Ok(crate::control::protocol::Deployment {
         name: application.name,
         path_prefix: application.path_prefix,
         kv: application.kv,
+        sql: application.sql,
+        migrations,
         handlers,
     })
 }

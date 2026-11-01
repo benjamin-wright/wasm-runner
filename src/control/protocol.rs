@@ -12,25 +12,30 @@ pub(crate) struct Deployment {
     pub path_prefix: String,
     #[serde(default)]
     pub kv: bool,
+    #[serde(default)]
+    pub sql: crate::persistence::sql::SqlConfig,
+    #[serde(default)]
+    pub migrations: Vec<crate::persistence::sql::Migration>,
     pub handlers: Vec<Handler>,
 }
 
 impl Deployment {
     pub fn validate(&self) -> Result<()> {
-        fn identifier(name: &str) -> bool {
-            !name.is_empty()
-                && name.len() <= 64
-                && name.as_bytes()[0].is_ascii_lowercase()
-                && name
-                    .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        }
-        ensure!(identifier(&self.name), "invalid application name");
+        self.sql.validate()?;
+        ensure!(
+            self.sql.enabled || self.migrations.is_empty(),
+            "migrations require SQL to be enabled"
+        );
+        crate::persistence::sql::validate_migrations(&self.migrations, self.sql.migration_target)?;
+        ensure!(
+            crate::identifier::is_valid(&self.name),
+            "invalid application name"
+        );
         ensure!(!self.handlers.is_empty(), "application must have handlers");
         let mut names = std::collections::HashSet::new();
         for handler in &self.handlers {
             ensure!(
-                identifier(&handler.name) && names.insert(&handler.name),
+                crate::identifier::is_valid(&handler.name) && names.insert(&handler.name),
                 "invalid or duplicate handler name"
             );
             ensure!(
@@ -65,6 +70,8 @@ pub(crate) enum Reply {
         applications: Vec<ApplicationInfo>,
         #[serde(default)]
         storage: crate::persistence::StorageInfo,
+        #[serde(default)]
+        sql: Vec<crate::persistence::sql::SqlInfo>,
     },
     Applications {
         applications: Vec<ApplicationInfo>,

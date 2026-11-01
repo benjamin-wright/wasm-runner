@@ -49,11 +49,11 @@ manifest; see [manifest and discovery rules](../docs/reference.md#source-discove
 Build components separately, then serve them with `wr run`. Version 0.2.0 adds
 `path-params` and replaces the optional raw query with grouped decoded values;
 rebuild all older components. Incompatible interfaces fail server startup.
-The WIT world imports `local:kv/store@0.1.0`; Rust's compilation target introduces
+The WIT world imports `local:kv/store@0.1.0` and `local:sql/database@0.2.0`; Rust's compilation target introduces
 WASI imports. The [runtime policy](../docs/reference.md#runtime-and-wasi-policy)
 defines supported interfaces and permissions. Guest state is fresh for every
 invocation. Previously built HTTP-only components remain compatible. Event
-handlers and SQL are not implemented.
+handlers are not implemented. Previously built KV components also remain compatible.
 
 ## Persistent application values
 
@@ -83,3 +83,54 @@ HTTP; see the [counter example](../examples/functions/counter.rs). A later
 trap or timeout does not undo writes, so retrying an increment can count twice.
 See [storage behavior](../docs/reference.md#persistent-application-kv) for limits,
 durability, ownership, and inspection.
+
+## SQL queries and mutations
+
+Enable SQL with `sql: {enabled: true}` in the manifest and put schema changes in
+the application's `migrations` directory. The runner applies pending migrations
+after preparing the application and before publishing it. See the
+[SQL reference](../docs/reference.md#persistent-application-sql) for naming,
+history integrity, targets, compatibility, and rollback requirements.
+
+The generated [SQL interface](deps/sql/database.wit) is exported as `crate::sql`:
+
+```rust
+use crate::sql::{self, Statement, Value};
+
+fn greeting() -> Result<Option<String>, sql::SqlError> {
+    let cursor = sql::query(&Statement {
+        sql: "SELECT message FROM greetings WHERE id = ?1".into(),
+        parameters: vec![Value::Integer(1)],
+    })?;
+    Ok(cursor.next()?.and_then(|row| match row.into_iter().next() {
+        Some(Value::Text(message)) => Some(message),
+        _ => None,
+    }))
+}
+```
+
+`query` returns a cursor resource. Use `cursor.columns()` for metadata and
+`while let Some(row) = cursor.next()?` to process one row at a time. There is no
+total row-count limit. A cursor retains one pooled read connection and a snapshot;
+writes performed while iterating do not alter that snapshot. Drop it for early
+release. Exhaustion/errors release the reader, and invocation teardown also
+cleans up cursors that the guest failed to drop. SQL 0.1.0 components must be
+rebuilt for this cursor API; HTTP-only and KV components remain compatible.
+
+`execute` accepts one mutation without returned columns and returns the affected
+row count. `batch` executes a list of such mutations in one transaction and
+returns each statement's count. Bind parameters instead of interpolating values.
+SQL null, integers, real numbers, text, and bytes have distinct variants; SQLite
+column affinity still controls how stored values are interpreted.
+
+Schema changes belong in migrations. Guests cannot access migration history,
+open other databases, change engine settings, or manage transaction boundaries.
+Every operation checks its application's capability and returns `Disabled` when
+SQL is off. Writers wait for the application's write connection; queries lease
+readers from a pool. First-query waits use the invocation deadline. At most four
+cursor resources may be held per invocation; nested queries return `Limit` if
+no reader is immediately available. An expired waiter executes no SQL. `Busy`
+is reserved for SQLite-level lock conflicts outside host coordination; no
+operation is automatically retried. A committed mutation survives a
+later guest trap or timeout. The [SQL greeting](../examples/functions/sql-greet.rs)
+demonstrates error handling without any migration code in the handler.

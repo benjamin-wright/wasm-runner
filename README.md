@@ -39,7 +39,8 @@ The [example application](examples/application.yaml),
 [manifest schema](application.schema.json), and [WIT world](wit/world.wit) supply
 concrete examples and exact interface definitions. The guest interface is custom,
 not WASI HTTP. Applications can opt into [persistent typed KV storage](docs/reference.md#persistent-application-kv),
-including atomic counters. SQL and non-HTTP event handling are not implemented.
+including atomic counters, and [embedded SQL with streaming cursors and deployment migrations](docs/reference.md#persistent-application-sql).
+Non-HTTP event handling is not implemented.
 
 ## Shareable agent skill
 

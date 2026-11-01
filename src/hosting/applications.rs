@@ -3,7 +3,11 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
-use crate::persistence::{Storage, StorageInfo};
+use crate::persistence::{
+    Storage, StorageInfo,
+    sql::{Migration, SqlConfig, SqlInfo, SqlStorage, validate_migrations},
+};
+use crate::runtime::Capabilities;
 use anyhow::{Result, ensure};
 use rocket::local::asynchronous::Client;
 use serde::{Deserialize, Serialize};
@@ -19,12 +23,15 @@ pub(crate) struct Applications {
     config: Config,
     pub(super) state: Arc<State>,
     storage: Option<Arc<Storage>>,
+    sql: Option<Arc<SqlStorage>>,
+    publication: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub(super) struct Application {
     path_prefix: String,
     pub(super) client: Client,
     kv: bool,
+    sql: bool,
     metrics: HandlerMetrics,
 }
 
@@ -36,6 +43,8 @@ pub(crate) struct ApplicationInfo {
     pub functions: Vec<FunctionInfo>,
     #[serde(default)]
     pub kv: bool,
+    #[serde(default)]
+    pub sql: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -52,12 +61,22 @@ impl Applications {
     }
 
     pub(crate) fn with_storage(config: Config, storage: Option<Arc<Storage>>) -> Result<Arc<Self>> {
+        Self::with_persistence(config, storage, None)
+    }
+
+    pub(crate) fn with_persistence(
+        config: Config,
+        storage: Option<Arc<Storage>>,
+        sql: Option<Arc<SqlStorage>>,
+    ) -> Result<Arc<Self>> {
         let state = State::new(config.clone())?;
         Ok(Arc::new(Self {
             current: RwLock::new(BTreeMap::new()),
             config,
             state,
             storage,
+            sql,
+            publication: Arc::new(tokio::sync::Mutex::new(())),
         }))
     }
 
@@ -98,6 +117,7 @@ impl Applications {
                     path_prefix: application.path_prefix.clone(),
                     functions,
                     kv: application.kv,
+                    sql: application.sql,
                 }
             })
             .collect()
@@ -111,6 +131,14 @@ impl Applications {
         .await?)
     }
 
+    pub(crate) async fn sql_info(&self) -> Result<Vec<SqlInfo>> {
+        let sql = self.sql.clone();
+        Ok(
+            tokio::task::spawn_blocking(move || sql.map(|sql| sql.inspect()).unwrap_or_default())
+                .await?,
+        )
+    }
+
     pub(crate) fn stop(&self) {
         let _current = self.current.write().expect("application registry");
         self.state.stopping.store(true, Ordering::SeqCst);
@@ -122,15 +150,24 @@ impl Applications {
         path_prefix: String,
         handlers: Vec<Handler>,
         kv: bool,
+        sql: SqlConfig,
+        migrations: Vec<Migration>,
     ) -> Result<()> {
         ensure!(
             !self.state.stopping.load(Ordering::SeqCst),
             "daemon is stopping"
         );
         validate_prefix(&path_prefix)?;
+        sql.validate()?;
+        ensure!(
+            sql.enabled || migrations.is_empty(),
+            "migrations require SQL to be enabled"
+        );
+        validate_migrations(&migrations, sql.migration_target)?;
         let timeout = self.config.execution_timeout;
         let storage = self.storage.clone();
         let identity = name.clone();
+        let sql_storage = self.sql.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             let store = if kv {
                 Some(
@@ -142,14 +179,47 @@ impl Applications {
             } else {
                 None
             };
-            routing::prepare(handlers, timeout, store)
+            let database = if sql.enabled {
+                Some(
+                    sql_storage
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("SQL storage is not configured"))?
+                        .application(&identity)?,
+                )
+            } else {
+                None
+            };
+            let prepared = routing::prepare(
+                handlers,
+                timeout,
+                Capabilities {
+                    kv: store,
+                    sql: database.clone(),
+                },
+            )?;
+            Ok::<_, anyhow::Error>((prepared, database))
         })
         .await??;
+        let (prepared, database) = prepared;
         let client = routing::dispatcher(prepared.routes, self.state.clone()).await?;
+        let publication = self.publication.clone().lock_owned().await;
+        self.validate_publication(&name, &path_prefix)?;
+        // Keep the publication guard in the blocking job if this future is cancelled.
+        let _publication = if let Some(database) = database {
+            tokio::task::spawn_blocking(move || {
+                let guard = publication;
+                database.migrate(&migrations, sql.migration_target)?;
+                Ok::<_, anyhow::Error>(guard)
+            })
+            .await??
+        } else {
+            publication
+        };
         let application = Arc::new(Application {
             path_prefix,
             client,
             kv,
+            sql: sql.enabled,
             metrics: prepared.metrics,
         });
         let mut current = self.current.write().expect("application registry");
@@ -157,25 +227,35 @@ impl Applications {
             !self.state.stopping.load(Ordering::SeqCst),
             "daemon is stopping"
         );
-        for (other_name, other) in current
-            .iter()
-            .filter(|(other_name, _)| **other_name != name)
-        {
-            ensure!(
-                relative_path(&application.path_prefix, &other.path_prefix).is_none()
-                    && relative_path(&other.path_prefix, &application.path_prefix).is_none(),
-                "path-prefix {} for {name} overlaps {} for {other_name}",
-                application.path_prefix,
-                other.path_prefix
-            );
-        }
         let previous = current.insert(name, application);
         drop(current);
         drop(previous);
         Ok(())
     }
 
-    pub(crate) fn remove(&self, name: &str) -> Result<()> {
+    fn validate_publication(&self, name: &str, path_prefix: &str) -> Result<()> {
+        let current = self.current.read().expect("application registry");
+        ensure!(
+            !self.state.stopping.load(Ordering::SeqCst),
+            "daemon is stopping"
+        );
+        for (other_name, other) in current
+            .iter()
+            .filter(|(other_name, _)| other_name.as_str() != name)
+        {
+            ensure!(
+                relative_path(path_prefix, &other.path_prefix).is_none()
+                    && relative_path(&other.path_prefix, path_prefix).is_none(),
+                "path-prefix {} for {name} overlaps {} for {other_name}",
+                path_prefix,
+                other.path_prefix
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn remove(&self, name: &str) -> Result<()> {
+        let _publication = self.publication.lock().await;
         let mut current = self.current.write().expect("application registry");
         ensure!(
             !self.state.stopping.load(Ordering::SeqCst),

@@ -7,7 +7,7 @@ use super::{
     metrics::HandlerMetrics,
     server::{Handler, RegisteredHandler, State},
 };
-use crate::runtime::Runtime;
+use crate::runtime::{Capabilities, Runtime};
 
 pub(super) struct Prepared {
     pub routes: Vec<Route>,
@@ -17,12 +17,9 @@ pub(super) struct Prepared {
 pub(super) fn prepare(
     handlers: Vec<Handler>,
     timeout: std::time::Duration,
-    store: Option<Arc<crate::persistence::KvStore>>,
+    capabilities: Capabilities,
 ) -> Result<Prepared> {
-    let mut runtime = match store {
-        Some(store) => Runtime::with_store(timeout, store)?,
-        None => Runtime::new(timeout)?,
-    };
+    let mut runtime = Runtime::with_capabilities(timeout, capabilities)?;
     let mut prepared = Vec::new();
     for handler in handlers {
         Origin::parse_route(&handler.path).map_err(|error| {

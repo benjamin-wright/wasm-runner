@@ -69,6 +69,17 @@ bindings for typed get/set, delete, and atomic integer increment. Storage is
 shared by all functions of the same application identity and survives removal
 and cleanup. See [Application features](references/features.md#application-capabilities-and-limits).
 
+For SQL, set `sql: {enabled: true}` and use generated `crate::sql` parameterized
+query/execute/batch operations. Query returns a cursor: read its column names,
+then call `next()` until it returns `None`, or drop it early. Readers use a bounded
+pool and retain a snapshot while writes proceed on a separate connection.
+SQL 0.1.0 handlers must rebuild for this API. Put schema changes in `migrations/NNNN-name.apply.sql`
+and optional paired `.rollback.sql` files. The host runs them after candidate
+validation; handlers contain no migration runner. Keep applied files unchanged
+and preserve compatibility with overlapping generations. Optional nested
+`sql.migration-target` selects an exact forward/rollback target; omission only
+moves forward. See the project's SQL reference for limits and history rules.
+
 ## Preview, build, and serve
 
 Run these commands from the application's parent directory, or use an absolute

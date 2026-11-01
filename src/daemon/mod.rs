@@ -35,7 +35,11 @@ pub(crate) async fn serve(
     let storage = std::sync::Arc::new(crate::persistence::Storage::new(
         fs::canonicalize(&paths.directory)?.join("kv"),
     ));
-    let applications = Applications::with_storage(config.clone(), Some(storage.clone()))?;
+    let sql = std::sync::Arc::new(crate::persistence::sql::SqlStorage::new(
+        fs::canonicalize(&paths.directory)?.join("sql"),
+    ));
+    let applications =
+        Applications::with_persistence(config.clone(), Some(storage.clone()), Some(sql))?;
     let (stop, stopped) = watch::channel(false);
     let (ready, address) = oneshot::channel();
     let mut host_stopped = stopped.clone();

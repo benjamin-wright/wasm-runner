@@ -6,7 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::persistence::{KvError, KvStore, KvValue};
+use crate::persistence::{KvError, KvStore, KvValue, sql::SqlStore};
+mod sql;
 use anyhow::{Context, Result, bail, ensure};
 use wasmtime::{
     Config, Engine, Store, Trap,
@@ -14,7 +15,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-wasmtime::component::bindgen!({ path: "wit", world: "http-function", imports: { default: trappable } });
+wasmtime::component::bindgen!({ path: "wit", world: "http-function", imports: { default: trappable }, with: { "local:sql/database/cursor": crate::persistence::sql::SqlCursor } });
 
 pub use exports::local::http::handler::{Request, Response};
 
@@ -51,7 +52,8 @@ struct HostState {
     table: ResourceTable,
     started: Instant,
     timeout: Duration,
-    kv: Option<Arc<KvStore>>,
+    capabilities: Capabilities,
+    sql_cursors: usize,
 }
 
 impl HostState {
@@ -63,7 +65,7 @@ impl HostState {
             self.started.elapsed() < self.timeout,
             "invocation expired before KV call"
         );
-        let result = match &self.kv {
+        let result = match &self.capabilities.kv {
             Some(store) => call(store).map_err(|error| match error {
                 KvError::InvalidKey => local::kv::store::KvError::InvalidKey,
                 KvError::ValueTooLarge => local::kv::store::KvError::ValueTooLarge,
@@ -132,12 +134,19 @@ impl WasiView for HostState {
     }
 }
 
+/// Concrete capabilities bound to one application, shared across fresh invocations.
+#[derive(Clone, Default)]
+pub struct Capabilities {
+    pub kv: Option<Arc<KvStore>>,
+    pub sql: Option<Arc<SqlStore>>,
+}
+
 pub struct Runtime {
     engine: Engine,
     modules: Vec<HttpFunctionPre<HostState>>,
     owner: Arc<()>,
     timeout: Duration,
-    kv: Option<Arc<KvStore>>,
+    capabilities: Capabilities,
     stop: mpsc::Sender<()>,
     ticker: Option<JoinHandle<()>>,
 }
@@ -172,7 +181,7 @@ impl Runtime {
             modules: Vec::new(),
             owner: Arc::new(()),
             timeout,
-            kv: None,
+            capabilities: Capabilities::default(),
             stop,
             ticker: Some(ticker),
         })
@@ -181,7 +190,13 @@ impl Runtime {
     /// Bind every invocation to one application's storage capability.
     pub fn with_store(timeout: Duration, store: Arc<KvStore>) -> Result<Self> {
         let mut runtime = Self::new(timeout)?;
-        runtime.kv = Some(store);
+        runtime.capabilities.kv = Some(store);
+        Ok(runtime)
+    }
+
+    pub fn with_capabilities(timeout: Duration, capabilities: Capabilities) -> Result<Self> {
+        let mut runtime = Self::new(timeout)?;
+        runtime.capabilities = capabilities;
         Ok(runtime)
     }
 
@@ -189,7 +204,7 @@ impl Runtime {
     pub fn register(&mut self, bytes: &[u8]) -> Result<ModuleId> {
         let component = Component::new(&self.engine, bytes).context("compiling component")?;
         for (name, _) in component.component_type().imports(&self.engine) {
-            if name == "local:kv/store@0.1.0" {
+            if matches!(name, "local:kv/store@0.1.0" | "local:sql/database@0.2.0") {
                 continue;
             }
             let interface = name.split('@').next().unwrap_or(name);
@@ -224,6 +239,10 @@ impl Runtime {
         let mut linker = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         local::kv::store::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+            &mut linker,
+            |state| state,
+        )?;
+        local::sql::database::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             &mut linker,
             |state| state,
         )?;
@@ -286,7 +305,8 @@ impl Runtime {
             table: ResourceTable::new(),
             started,
             timeout: self.timeout,
-            kv: self.kv.clone(),
+            capabilities: self.capabilities.clone(),
+            sql_cursors: 0,
         };
         let mut store = Store::new(&self.engine, state);
         let remaining = self

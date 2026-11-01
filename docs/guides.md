@@ -328,3 +328,54 @@ while the daemon restarts.
 Ctrl-C in the admin terminal stops only the UI; the daemon and deployed
 applications keep running. See [Admin UI](reference.md#admin-ui) for the exact
 listener, response, and timeout behavior.
+
+
+## Use SQL and deploy schema changes
+
+Enable SQL in the application manifest:
+
+```yaml
+sql:
+  enabled: true
+```
+
+Put schema SQL in `migrations/0001-greetings.apply.sql` and, if reversible,
+`migrations/0001-greetings.rollback.sql`. The [example apply script](../examples/migrations/0001-greetings.apply.sql)
+and [rollback script](../examples/migrations/0001-greetings.rollback.sql) create
+and remove a greeting table. The [SQL handler](../examples/functions/sql-greet.rs)
+uses the generated `crate::sql` bindings and has no migration machinery.
+`sql::query` returns a cursor; `cursor.next()` returns one optional row at a time.
+Drop it early if you stop iterating. Read cursors retain their original snapshots
+while other readers and the writer proceed. The full result is never buffered
+by the host. Rebuild old SQL 0.1.0 handlers for the cursor interface.
+
+```sh
+wr update examples
+wr build examples
+wr deploy examples
+curl http://127.0.0.1:9000/demo/sql/hello
+wr daemon status
+```
+
+This assumes a daemon already listening on port 9000. `wr run examples` applies
+the same migrations to its separate foreground database. Build stays separate
+from run/deploy; deployment packages the current SQL files and existing component
+bytes. No SQLite CLI or SQL server installation is required.
+
+For the next schema change, add a new numbered apply file rather than editing
+an applied file. Use additive changes while older handlers may still execute.
+A deployment can change only the schema, only the code, or both. To target an
+older schema, retain all migration files and set an explicit target:
+
+```yaml
+sql:
+  enabled: true
+  migration-target: 1
+```
+
+Deploy code compatible with that schema and with the transition. Every migration
+above the target must have its original rollback file. Rollbacks can destroy
+data and do not guarantee that an old application version can run. If deployment
+fails after a migration commit, inspect the database migration ID in status/admin;
+retries skip already committed work. See the [SQL reference](reference.md#persistent-application-sql)
+for immutable hashes, transaction restrictions, contention deadlines, and backup rules.

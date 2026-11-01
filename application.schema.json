@@ -8,6 +8,17 @@
   "properties": {
     "name": { "$ref": "#/definitions/identifier" },
     "kv": { "type": "boolean", "default": false, "description": "Enable persistent application-scoped key/value storage." },
+    "sql": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "migration-target": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
+      },
+      "if": { "properties": { "enabled": { "const": false } } },
+      "then": { "not": { "required": ["migration-target"] } }
+    },
     "path-prefix": {
       "description": "Application mount path: / or literal unreserved segments, without trailing slash or dot segments.",
       "type": "string",

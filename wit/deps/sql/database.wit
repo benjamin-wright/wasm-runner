@@ -1,0 +1,36 @@
+package local:sql@0.2.0;
+
+interface database {
+    variant value {
+        null,
+        integer(s64),
+        real(f64),
+        text(string),
+        bytes(list<u8>),
+    }
+
+    record statement {
+        sql: string,
+        parameters: list<value>,
+    }
+
+    resource cursor {
+        columns: func() -> list<string>;
+        next: func() -> result<option<list<value>>, sql-error>;
+    }
+
+    enum sql-error {
+        disabled,
+        invalid-statement,
+        denied,
+        constraint,
+        busy,
+        limit,
+        timeout,
+        storage,
+    }
+
+    execute: func(statement: statement) -> result<u64, sql-error>;
+    query: func(statement: statement) -> result<cursor, sql-error>;
+    batch: func(statements: list<statement>) -> result<list<u64>, sql-error>;
+}

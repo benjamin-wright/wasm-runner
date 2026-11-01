@@ -27,7 +27,8 @@ multiple applications at declarative, nonoverlapping path prefixes on one HTTP l
 atomic deployment, listing, removal, status, and shutdown. Deployments are
 in-memory and must be resubmitted after restarting the daemon. A foreground
 `wr admin` client serves a local, read-only browser view of live daemon metadata.
-Applications can opt into persistent typed KV values and atomic counters;
+Applications can opt into persistent typed KV values and atomic counters, or
+application-scoped SQL databases with deployment migrations;
 storage identity and inspection survive application removal and replacement.
 Source discovery is independent of route configuration, within the
 [manifest and discovery constraints](docs/reference.md#source-discovery).
@@ -47,11 +48,11 @@ every filesystem failure.
 | R3 | Build a guest-contract component for every valid directly discovered source, including sources without route entries. | Successful builds publish every expected component with the [guest interface](wit/README.md); invalid discovered names fail setup. Covered by `setup_discovers_all_direct_rust_sources_and_rejects_invalid_names` and `build_produces_http_components_and_preserves_outputs_on_cargo_failure`. |
 | R4 | Preserve previously published components when Cargo compilation fails, so a failed build cannot appear to publish a new successful result. | The command fails and leaves published components unchanged. Publication-copy failures are separately [nontransactional](docs/reference.md#build). Covered by `build_produces_http_components_and_preserves_outputs_on_cargo_failure`. |
 | R5 | Remove only the documented generated workspace and build outputs during cleanup, preserving application inputs and user configuration. | The [cleanup set and ownership checks](docs/reference.md#clean) apply even with a missing or invalid application manifest. Missing outputs are tolerated, and removed directory symlinks are not followed. Covered by `clean_removes_generated_files_and_preserves_user_files`, `clean_refuses_a_handwritten_cargo_manifest_before_removing_anything`, `clean_does_not_require_a_valid_manifest_or_function_sources`, and `clean_removes_directory_symlinks_without_following_them`. |
-| R6 | Start serving only after all inputs and components are prepared and the listener is bound. | Run requires a separate build, reports function/path context for missing components, and never announces readiness on preparation failure. Covered by `run_requires_built_compatible_components_before_readiness` and the real-socket server check in the component build case. CLI startup and signal-driven shutdown require the [manual workflow](docs/guides.md#manually-exercise-failures-and-concurrency). |
+| R6 | Start serving only after all inputs and components are prepared and the listener is bound. | Run requires a separate build, reports function/path context for missing components, and never announces readiness on preparation failure. Covered by `run_requires_built_compatible_components_before_readiness` and `http_serving_routes_requests_and_rejects_collisions`. `foreground_serving_honors_application_prefix` checks CLI startup and prefix handling, and `foreground_kv_survives_restart_and_clean` checks signal-driven shutdown and persistence. Draining active executions remains a [manual workflow](docs/guides.md#manually-exercise-failures-and-concurrency). |
 | R7 | Preserve user configuration and support repeated setup without unnecessary churn, making the generated workspace usable during development. | Ignore rules and editor settings are merged as [documented](docs/reference.md#ignore-rules-and-editor-settings); repeated setup avoids duplicates and leaves identical generated files untouched. Invalid editor settings fail before writing. Covered by the setup repeatability, ignore-rule, editor-merge, and invalid-settings cases; incremental build reuse is checked in the component build case. |
 | R8 | Let authors configure supported shared and per-function dependencies, build with stable locked versions by default, and explicitly update them, while keeping guest dependency resolution separate from the runner. | Invalid declaration conflicts fail generation; normal debug/release builds reject missing or outdated lockfiles without changing them, and `--unlocked` explicitly permits changes. `wr update` creates or refreshes the application lockfile to compatible versions without compiling or changing published components. See [build](docs/reference.md#build) and [update](docs/reference.md#update). Covered by `setup_rejects_invalid_dependencies_without_partial_output`, `update_refreshes_dependencies_without_building`, and the component build case. |
 | R9 | Execute registered HTTP components through a reusable synchronous runtime. | Registration validates imports and the versioned contract and retains compiled code. Calls use fresh stores/instances and may run concurrently; invalid IDs, traps, and nontermination return errors without stopping the host. The engine-owned epoch ticker traps at the execution deadline and shuts down with the runtime. Server coverage exercises real components; the deliberately misbehaving example handler supports manual isolation, timeout, trap, and recovery checks. |
-| R10 | Serve built applications with bounded HTTP execution. | Rocket owns route syntax, default ranking, collision detection, method matching, slash handling, and HEAD fallback. Query decoding and bounded request bodies follow the [server reference](docs/reference.md#run). The example-based HTTP smoke check in `build_produces_http_components_and_preserves_outputs_on_cargo_failure` covers routing and body handling through real sockets, plus rejection of collisions before readiness. Overload, disconnects, request-reading timeouts, and draining shutdown are manual checks using the [guide](docs/guides.md#manually-exercise-failures-and-concurrency). |
+| R10 | Serve built applications with bounded HTTP execution. | Rocket owns route syntax, default ranking, collision detection, method matching, slash handling, and HEAD fallback. Query decoding and bounded request bodies follow the [server reference](docs/reference.md#run). `http_serving_routes_requests_and_rejects_collisions` covers routing and body handling through real sockets, plus rejection of collisions before readiness. Overload, disconnects, request-reading timeouts, and draining shutdown are manual checks using the [guide](docs/guides.md#manually-exercise-failures-and-concurrency). |
 
 Failure behavior, output paths, and preservation rules in the reference are
 part of these commitments even where the table summarizes them. Filesystem
@@ -61,9 +62,14 @@ writes, removal, and publication are not promised to be transactional.
 
 | ID | Requirement | Observable acceptance condition and coverage |
 | --- | --- | --- |
-| R11 | Separate daemon lifecycle from application deployment. | `daemon start` returns after both listeners are bound, or succeeds by reporting an already running instance without changing its address or applications. `status` queries the live process, and `stop` waits for listener closure and execution draining. Failed startup leaves no new live daemon. `daemon_lifecycle_owns_both_listeners_and_restarts_empty` covers process lifecycle, repeated starts, failed binding, socket permissions, singleton ownership, and stale-socket recovery; the component-build workflow checks preservation of deployments on repeated start. Draining active executions remains a manual scenario. |
-| R12 | Host independently managed applications without interrupting unrelated routes. | A deployment contains identity, an explicit path prefix, routes, and component bytes. Invalid components, internal route collisions, or overlapping prefixes leave all active applications unchanged. Replacement and removal affect future requests; requests already using a generation retain it. The component-build workflow covers two applications, failed and successful replacements, concurrent requests, removal, independence from source paths, and empty restart; replacing an executing generation remains a manual scenario. |
-| R13 | Declare application mount points without deployment flags or retained defaults. | Every manifest requires a canonical `path-prefix`. Run and deploy serve application-relative routes beneath it and strip the prefix before guest execution. Different applications may share function paths but cannot have equal or nested prefixes. Listing/status show current prefixes. Prefix changes publish atomically with the application, and failures preserve old mounts. `manifests_require_literal_canonical_path_prefixes` covers input constraints; the component-build workflow covers prefix routing, capture/query preservation, boundaries, root mounts, conflicts, replacement, and removal. |
+| R11 | Separate daemon lifecycle from application deployment. | `daemon start` returns after both listeners are bound, or succeeds by reporting an already running instance without changing its address or applications. `status` queries the live process, and `stop` waits for listener closure and execution draining. Failed startup leaves no new live daemon. `daemon_lifecycle_owns_both_listeners_and_restarts_empty` covers process lifecycle, repeated starts, failed binding, socket permissions, singleton ownership, and stale-socket recovery; the deployment workflow checks preservation of deployments on repeated start. Draining active executions remains a manual scenario. |
+| R12 | Host independently managed applications without interrupting unrelated routes. | A deployment contains identity, an explicit path prefix, routes, and component bytes. Invalid components, internal route collisions, or overlapping prefixes leave all active applications unchanged. Replacement and removal affect future requests; requests already using a generation retain it. The deployment workflow covers two applications, failed and successful replacements, concurrent requests, removal, independence from source paths, and empty restart; replacing an executing generation remains a manual scenario. |
+| R13 | Declare application mount points without deployment flags or retained defaults. | Every manifest requires a canonical `path-prefix`. Run and deploy serve application-relative routes beneath it and strip the prefix before guest execution. Different applications may share function paths but cannot have equal or nested prefixes. Listing/status show current prefixes. Prefix changes publish atomically with the application, and failures preserve old mounts. `manifests_require_literal_canonical_path_prefixes` covers input constraints; the deployment workflow covers prefix routing, capture/query preservation, boundaries, root mounts, conflicts, replacement, and removal. |
+
+The deployment workflow is independently covered by
+`deployment_replacement_preserves_routes_and_admin_metrics`. It shares compiled
+component bytes with other hosting tests, but uses its own application files,
+daemon, and admin listener.
 
 ### R14: Local administration UI through the client
 
@@ -118,14 +124,15 @@ defines command options, page responses, and timeouts. Coverage in
 `admin_ui_reports_live_status_and_recovers` checks startup, metadata, errors,
 escaping, recovery, and independent shutdown; `admin_ui_cancels_stalled_metadata_requests`
 checks the control deadline and connection cancellation. The existing
-component-build workflow checks live deployment, replacement, removal, root
+deployment workflow checks live deployment, replacement, removal, root
 mounts, and independence from local build outputs. It also checks function
 names, ordering, methods, escaped dynamic paths, and metadata preservation on
 failed deployment and refresh after replacement or removal.
 Handler metrics coverage extends that workflow with empty windows, GET/HEAD
-counting, guest response codes, per-handler links, and generation resets; the KV
-component workflow checks trap and timeout response counts. The metrics window
-test checks aggregation, boundary expiry, and idle recovery without sleeping.
+counting, guest response codes, per-handler links, and generation resets.
+`daemon_kv_preserves_data_and_reports_live_metrics` checks trap and timeout
+response counts. The metrics window test checks aggregation, boundary expiry,
+and idle recovery without sleeping.
 
 ## Persistent application KV
 
@@ -162,11 +169,70 @@ KV persistence does not persist deployments.
 Coverage uses [public storage tests](tests/storage.rs) and real components and
 process workflows in [CLI tests](tests/cli.rs). Operational slow-storage and
 power-loss validation remain [manual procedures](docs/guides.md#observe-kv-storage).
+`runtime_kv_isolates_calls_and_preserves_accepted_writes`,
+`daemon_kv_preserves_data_and_reports_live_metrics`, and
+`foreground_kv_survives_restart_and_clean` independently cover runtime,
+daemon, and foreground behavior. `runtime_accepts_pre_sql_components` compiles frozen HTTP-only and HTTP/KV
+interfaces and checks backward compatibility.
 These tests do not establish production latency targets.
+
+## Persistent application SQL
+
+Applications enable embedded SQL with the nested `sql` configuration. Schema
+changes are SQL files shipped with the deployment; the runner owns migration
+execution and immutable history. The [SQL reference](docs/reference.md#persistent-application-sql),
+[schema](application.schema.json), and [guest interface](wit/deps/sql/database.wit)
+define the exact contracts.
+
+Acceptance conditions:
+
+- Each validated application identity has its own database, shared by functions
+  and overlapping generations. Replacement, removal, disabling, and cleanup
+  preserve stored data. Disabled applications do not open SQL storage.
+- Prepared statements transport typed null/integer/real/text/byte parameters and
+  return cursor resources for incremental row consumption. A scan can exceed the
+  old accumulated row/byte limits while each returned row stays bounded.
+  Mutation batches are atomic. Calls check capability
+  availability and cannot access another database, filesystem paths, engine
+  settings, transaction controls, or runner migration history.
+- The host validates candidate components, routes, and prefix ownership before
+  running migration SQL. Rejected candidates do not change application schemas.
+- Migrations use increasing numeric IDs and optional paired rollback files.
+  Recorded names and exact-content hashes remain immutable after rollback.
+  Missing or edited recorded history fails before schema changes.
+- Explicit targets support forward and reverse transitions; omitted targets
+  never implicitly roll back. An entire transition and its history commit or
+  roll back together. Missing rollback scripts fail before any transition.
+- Publication follows migration commit. Authors own compatibility with all
+  generations that may execute, including after a commit/publication failure.
+  Already committed SQL survives later guest failures and is never replayed
+  automatically. Query work and result sizes are bounded; native I/O stalls
+  are not promised a hard upper bound.
+- A bounded, lazy pool allows independent read snapshots to run concurrently
+  with each other and the queued writer. A handler can mutate data while reading
+  its original snapshot. Cursor exhaustion, errors, explicit drop, and invocation
+  teardown release readers. Cursors retain database ownership until dropped.
+- Acquisition waits use existing execution deadlines; a call that expires
+  while waiting executes no SQL. Cursor/resource limits prevent unbounded leases,
+  and nested queries do not wait while holding cursors against an exhausted pool.
+  Waiting retains the host's bounded execution permits. SQL 0.1.0 callers must
+  rebuild for the cursor API; existing HTTP-only and KV components remain valid.
+- SQL state and the current migration ID are visible through daemon status and
+  admin inspection, independently of generation metadata. Retained databases
+  are discovered on the first SQL-enabled opening after restart.
+
+Public persistence coverage lives in [SQL tests](tests/sql.rs). Real components
+and process workflows in [CLI tests](tests/cli.rs) cover
+`runtime_sql_checks_capabilities_and_preserves_committed_writes`,
+`sql_deployment_validates_before_migrating_and_preserves_history`, and
+`foreground_sql_migrates_and_preserves_data_across_restart_and_clean`.
+Existing compatibility and deployment tests continue to protect HTTP/KV clients.
+Disk-stall, power-loss, and application-specific schema compatibility remain
+operational validation responsibilities, not automated guarantees.
 
 ## Deliberate exclusions
 
-This increment does not provide SQL host services or non-HTTP event triggers.
+This increment does not provide non-HTTP event triggers.
 The custom guest interface is not WASI HTTP. Prebuilt module declarations,
 automatic builds on run, automatic prerequisite installation, file watching,
 streaming, TLS configuration, rate limiting, custom schedulers, persistent
