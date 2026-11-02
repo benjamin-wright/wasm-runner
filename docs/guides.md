@@ -94,16 +94,17 @@ template name:
 ```rust
 #[derive(askama::Template)]
 #[template(path = "home.html")]
-pub struct Home<'a> {
-    pub messages: &'a [String],
+struct Home<'a> {
+    messages: &'a [String],
 }
 ```
 
 There is no application-root Askama configuration to maintain. Keep the HTML
 templates outside `.wr` so they survive cleanup; the generated configuration
 is recreated by setup or build. See the [generated-file contract](reference.md#generated-files).
-The [shared HTML helper](../examples/libs/views.rs)
-renders a view into the existing response type with
+Handlers call `views::home(&messages)`. The
+[view module](../examples/libs/views.rs) owns template construction and renders
+it into the existing response type with
 `Content-Type: text/html; charset=utf-8`.
 
 To try the checked-in page:

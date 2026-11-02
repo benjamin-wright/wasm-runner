@@ -4,11 +4,15 @@ use crate::{Response, libs::responses::text};
 
 #[derive(Template)]
 #[template(path = "home.html")]
-pub struct Home<'a> {
-    pub messages: &'a [String],
+struct Home<'a> {
+    messages: &'a [String],
 }
 
-pub fn html(template: &impl Template) -> Response {
+pub fn home(messages: &[String]) -> Response {
+    html(&Home { messages })
+}
+
+fn html(template: &impl Template) -> Response {
     match template.render() {
         Ok(body) => Response {
             status: 200,

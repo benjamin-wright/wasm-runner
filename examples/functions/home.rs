@@ -5,7 +5,7 @@ use crate::{
 
 pub fn handle(_request: Request) -> Response {
     match greetings::list() {
-        Ok(messages) => views::html(&views::Home { messages: &messages }),
+        Ok(messages) => views::home(&messages),
         Err(_) => text(503, "Unable to load greetings"),
     }
 }
