@@ -19,6 +19,39 @@ const SQL_FUNCTION: &str = include_str!("fixtures/sql.rs");
 const SQL_APPLY: &str = include_str!("fixtures/0001-counters.apply.sql");
 const SQL_ROLLBACK: &str = include_str!("fixtures/0001-counters.rollback.sql");
 const KV_FUNCTION: &str = include_str!("fixtures/kv.rs");
+const COUNTER_FUNCTION: &str = include_str!("../examples/functions/counter.rs");
+const SHARED_LIBS: &str = include_str!("../examples/libs/mod.rs");
+const SHARED_RESPONSES: &str = include_str!("../examples/libs/responses.rs");
+
+#[test]
+fn shared_libraries_run_in_multiple_components() {
+    use std::time::Duration;
+    use wasm_runner::{persistence::Storage, runtime::Runtime};
+
+    let fixture = ManifestFixture::new(EXAMPLE);
+    let root = fs::canonicalize(&fixture.directory)
+        .unwrap()
+        .join(".wr-data/kv");
+    let storage = Storage::new(root);
+    let mut runtime = Runtime::with_store(
+        Duration::from_secs(2),
+        storage.application("hello").unwrap(),
+    )
+    .unwrap();
+    for (name, status, body) in [
+        ("counter", 200, "1"),
+        ("sql-greet", 500, "Unable to read greeting"),
+    ] {
+        let id = runtime.register(compiled_component(name)).unwrap();
+        let response = runtime.execute(&id, &guest_request("/")).unwrap();
+        assert_eq!(response.status, status);
+        assert_eq!(response.body, body.as_bytes());
+        assert_eq!(
+            response.headers,
+            vec![("content-type".into(), "text/plain; charset=utf-8".into())]
+        );
+    }
+}
 
 fn guest_request(path: &str) -> wasm_runner::runtime::Request {
     wasm_runner::runtime::Request {
@@ -769,6 +802,12 @@ impl ManifestFixture {
         Self { directory, path }
     }
 
+    fn write_shared_libraries(&self) {
+        fs::create_dir_all(self.directory.join("libs")).unwrap();
+        fs::write(self.directory.join("libs/mod.rs"), SHARED_LIBS).unwrap();
+        fs::write(self.directory.join("libs/responses.rs"), SHARED_RESPONSES).unwrap();
+    }
+
     #[cfg(unix)]
     fn write_component(&self, name: &str, bytes: &[u8]) {
         let directory = self.directory.join(".wr/components");
@@ -806,6 +845,12 @@ impl Drop for ManifestFixture {
 
 fn source_application() -> ManifestFixture {
     let fixture = ManifestFixture::new(&format!("{EXAMPLE}\ndependencies:\n  serde_json: '1.0'\n"));
+    fixture.write_shared_libraries();
+    fs::write(
+        fixture.directory.join("functions/counter.rs"),
+        COUNTER_FUNCTION,
+    )
+    .unwrap();
     fs::write(fixture.directory.join("functions/echo.rs"), ECHO_FUNCTION).unwrap();
     fs::write(
         fixture.directory.join("functions/inspect.rs"),
@@ -859,18 +904,26 @@ fn compiled_component(name: &str) -> &'static [u8] {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        ["greet", "echo", "inspect", "kv-test", "sql-test"]
-            .into_iter()
-            .map(|name| {
-                let bytes = fs::read(
-                    fixture
-                        .directory
-                        .join(format!(".wr/components/{name}.wasm")),
-                )
-                .unwrap();
-                (name.to_owned(), bytes)
-            })
-            .collect()
+        [
+            "greet",
+            "echo",
+            "inspect",
+            "kv-test",
+            "sql-test",
+            "counter",
+            "sql-greet",
+        ]
+        .into_iter()
+        .map(|name| {
+            let bytes = fs::read(
+                fixture
+                    .directory
+                    .join(format!(".wr/components/{name}.wasm")),
+            )
+            .unwrap();
+            (name.to_owned(), bytes)
+        })
+        .collect()
     });
     &components[name]
 }
@@ -942,6 +995,7 @@ fn setup_previews_workspace_without_writing_files() {
         assert!(preview.contains(expected), "{preview}");
     }
     assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 2);
+    assert!(!preview.contains("pub mod libs;"));
 
     let output = fixture.run(&[]);
     assert!(!output.status.success());
@@ -952,10 +1006,11 @@ fn setup_previews_workspace_without_writing_files() {
 #[test]
 fn setup_writes_the_previewed_files_beside_the_manifest_and_can_be_repeated() {
     let expected_settings = r#"{
-  "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/functions"]
+  "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/functions", "${workspaceFolder}/libs"]
 }
 "#;
     let fixture = ManifestFixture::new(SETUP_APPLICATION);
+    fixture.write_shared_libraries();
     let preview = wr(&["setup", fixture.directory.to_str().unwrap(), "--dry-run"]);
     assert!(preview.status.success());
     let preview = String::from_utf8(preview.stdout).unwrap();
@@ -982,6 +1037,46 @@ fn setup_writes_the_previewed_files_beside_the_manifest_and_can_be_repeated() {
             expected_settings
         );
     }
+}
+
+#[test]
+fn setup_refreshes_optional_shared_library_entry_point() {
+    let fixture = ManifestFixture::new(SETUP_APPLICATION);
+    let directory = &fixture.directory;
+    fs::create_dir(directory.join("libs")).unwrap();
+    fs::write(directory.join("libs/unused.rs"), "not a Rust module").unwrap();
+    let entry = directory.join(".wr/functions/greet/lib.rs");
+
+    for has_libs in [false, true, false] {
+        if has_libs {
+            fixture.write_shared_libraries();
+        } else if directory.join("libs/mod.rs").exists() {
+            fs::remove_file(directory.join("libs/mod.rs")).unwrap();
+        }
+        let output = wr(&["setup", directory.to_str().unwrap()]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&entry)
+                .unwrap()
+                .contains("pub mod libs;"),
+            has_libs
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("libs/unused.rs")).unwrap(),
+            "not a Rust module"
+        );
+    }
+
+    let previous = fs::read(&entry).unwrap();
+    fs::create_dir(directory.join("libs/mod.rs")).unwrap();
+    let output = wr(&["setup", directory.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("libs/mod.rs"));
+    assert_eq!(fs::read(entry).unwrap(), previous);
 }
 
 #[test]
@@ -1153,6 +1248,7 @@ fn setup_rejects_invalid_dependencies_without_partial_output() {
 #[test]
 fn clean_removes_generated_files_and_preserves_user_files() {
     let fixture = ManifestFixture::new(SETUP_APPLICATION);
+    fixture.write_shared_libraries();
     let output = wr(&["setup", fixture.directory.to_str().unwrap()]);
     assert!(output.status.success());
     fs::create_dir_all(fixture.directory.join("target/wasm32-wasip2/debug")).unwrap();
@@ -1177,6 +1273,8 @@ fn clean_removes_generated_files_and_preserves_user_files() {
         "application.yaml",
         "functions/greet.rs",
         "functions/echo.rs",
+        "libs/mod.rs",
+        "libs/responses.rs",
         "Cargo.lock",
         ".gitignore",
         ".vscode/settings.json",
@@ -1699,7 +1797,7 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
     let updated_lockfile = fs::read(fixture.directory.join("Cargo.lock")).unwrap();
     assert_ne!(updated_lockfile, lockfile);
     let previous = fs::read(&destination).unwrap();
-    fs::write(fixture.directory.join("functions/greet.rs"), "invalid Rust").unwrap();
+    fs::write(fixture.directory.join("libs/responses.rs"), "invalid Rust").unwrap();
     let output = fixture.build(&[]);
     assert_eq!(output.status.code(), Some(1));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("Built "));

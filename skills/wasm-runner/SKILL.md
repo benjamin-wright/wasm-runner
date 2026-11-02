@@ -60,6 +60,13 @@ configured function needs a matching source. Every direct `functions/*.rs` file
 is built, even if unlisted; unlisted sources have no HTTP route. Discovery is
 not recursive, so do not put unrelated Rust modules directly in this directory.
 
+For shared application code, create an optional `libs/mod.rs` beside `functions`.
+Declare child modules there and import their public items as `crate::libs::...`
+from handlers. Shared modules can use the generated HTTP, KV, and SQL bindings.
+They compile within every handler crate; put their dependencies in the common
+manifest dependencies. Rebuild after source changes. These are ordinary Rust
+modules, not separate Cargo packages or deployed components.
+
 Handlers import `Request` and `Response` from `crate`; `wr` supplies the HTTP
 server. Return expected application errors as `Response` values. Configure
 dependencies in the YAML manifest rather than generated Cargo files.

@@ -43,6 +43,8 @@ appropriate HTTP response, as the echo example does for invalid JSON.
 
 Function names come from source filenames. Routes belong to the application
 manifest; see [manifest and discovery rules](../docs/reference.md#source-discovery).
+For helpers shared by multiple handlers, use the optional
+[shared application modules](../docs/guides.md#reuse-code-between-handlers).
 
 ## Execution and compatibility
 

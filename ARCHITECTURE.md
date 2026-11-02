@@ -219,8 +219,15 @@ Generated entry points include the original handler sources and use the embedded
 trait and expose its `Request` and `Response` types directly to handlers.
 There is no parallel request/response model or conversion layer to keep in sync.
 
+When the application has `libs/mod.rs`, each entry point also includes it as
+`crate::libs`. Ordinary Rust module declarations own the shared source tree.
+Including source in the handler crate lets shared helpers use that crate's WIT
+bindings directly, without a separate guest API crate or cross-crate type
+conversion. The tradeoff is compilation in each handler's dependency context;
+this shares source, not runtime state or separately deployed components.
+
 The original sources live outside the generated package directories. Setup
-therefore merges a rust-analyzer source include into the application's editor
+therefore merges rust-analyzer source includes into the application's editor
 settings; Cargo resolves the source paths without that configuration. The
 [editor guide](docs/guides.md#prepare-vs-code) covers workspace selection.
 

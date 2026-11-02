@@ -32,6 +32,8 @@ application-scoped SQL databases with deployment migrations;
 storage identity and inspection survive application removal and replacement.
 Source discovery is independent of route configuration, within the
 [manifest and discovery constraints](docs/reference.md#source-discovery).
+Handlers can reuse application-owned Rust modules through an optional
+[shared entry point](docs/reference.md#shared-application-code).
 
 ## Implemented requirements
 
@@ -53,6 +55,15 @@ every filesystem failure.
 | R8 | Let authors configure supported shared and per-function dependencies, build with stable locked versions by default, and explicitly update them, while keeping guest dependency resolution separate from the runner. | Invalid declaration conflicts fail generation; normal debug/release builds reject missing or outdated lockfiles without changing them, and `--unlocked` explicitly permits changes. `wr update` creates or refreshes the application lockfile to compatible versions without compiling or changing published components. See [build](docs/reference.md#build) and [update](docs/reference.md#update). Covered by `setup_rejects_invalid_dependencies_without_partial_output`, `update_refreshes_dependencies_without_building`, and the component build case. |
 | R9 | Execute registered HTTP components through a reusable synchronous runtime. | Registration validates imports and the versioned contract and retains compiled code. Calls use fresh stores/instances and may run concurrently; invalid IDs, traps, and nontermination return errors without stopping the host. The engine-owned epoch ticker traps at the execution deadline and shuts down with the runtime. Server coverage exercises real components; the deliberately misbehaving example handler supports manual isolation, timeout, trap, and recovery checks. |
 | R10 | Serve built applications with bounded HTTP execution. | Rocket owns route syntax, default ranking, collision detection, method matching, slash handling, and HEAD fallback. Query decoding and bounded request bodies follow the [server reference](docs/reference.md#run). `http_serving_routes_requests_and_rejects_collisions` covers routing and body handling through real sockets, plus rejection of collisions before readiness. Overload, disconnects, request-reading timeouts, and draining shutdown are manual checks using the [guide](docs/guides.md#manually-exercise-failures-and-concurrency). |
+
+Shared-code acceptance: an optional `libs/mod.rs` is available as `crate::libs`
+in every handler, with access to the existing guest types. Applications without
+it retain their existing behavior. Generation follows entry-point addition and
+removal, preserves source files, and supports editor discovery. Covered by
+`shared_libraries_run_in_multiple_components`,
+`setup_refreshes_optional_shared_library_entry_point`, the preview/repeatability
+and cleanup cases, and the component build case, including shared-source
+compilation failure without replacing published components.
 
 Failure behavior, output paths, and preservation rules in the reference are
 part of these commitments even where the table summarizes them. Filesystem

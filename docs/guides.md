@@ -35,6 +35,35 @@ You can also build an unlisted source without giving it a route. See
 [source discovery](reference.md#source-discovery) for filename rules and the
 requirement to keep at least one configured function in the manifest.
 
+## Reuse code between handlers
+
+Create `libs/mod.rs` beside the application's `functions` directory. Declare
+shared modules there using ordinary Rust declarations:
+
+```rust
+pub mod responses;
+```
+
+Put the implementation in `libs/responses.rs`. The checked-in
+[response helper](../examples/libs/responses.rs) returns `crate::Response`, so
+handlers can call it without converting between different response types:
+
+```rust
+use crate::{Request, Response, libs::responses::text};
+
+pub fn handle(_request: Request) -> Response {
+    text(200, "Hello from shared code!")
+}
+```
+
+The [counter](../examples/functions/counter.rs) and
+[SQL greeting](../examples/functions/sql-greet.rs) both use this helper.
+Run `wr build examples` and restart or redeploy to try the changed components.
+No YAML entry is needed for a shared module. If shared code needs an external
+crate, put it in the common dependencies and run `wr update examples` before
+building. See [shared-code behavior](reference.md#shared-application-code) for
+discovery, ownership, and compilation boundaries.
+
 ## Configure dependencies
 
 Edit the application manifest, not generated Cargo manifests. To make
@@ -80,12 +109,12 @@ discoverable. Setup merges this setting into the application's
 
 ```json
 {
-  "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/functions"]
+  "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/functions", "${workspaceFolder}/libs"]
 }
 ```
 
-The source handlers live outside the generated Cargo package directories, so
-rust-analyzer needs the extra include path to resolve them. Cargo needs no such
+The source handlers and shared modules live outside the generated Cargo package
+directories, so rust-analyzer needs the extra include paths to resolve them. Cargo needs no such
 setting. Use absolute paths for extra includes; the VS Code extension expands
 `${workspaceFolder}`. A bare relative path such as `functions` is not suitable.
 See the upstream [rust-analyzer configuration](https://rust-analyzer.github.io/book/configuration.html)
@@ -100,7 +129,7 @@ If you prefer opening the parent repository, merge these settings in the
 ```json
 {
   "rust-analyzer.linkedProjects": ["Cargo.toml", "examples/Cargo.toml"],
-  "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/examples/functions"]
+  "rust-analyzer.vfs.extraIncludes": ["${workspaceFolder}/examples/functions", "${workspaceFolder}/examples/libs"]
 }
 ```
 

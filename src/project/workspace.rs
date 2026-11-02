@@ -12,6 +12,7 @@ const KV_WORLD: &str = include_str!("../../wit/deps/kv/store.wit");
 const SQL_WORLD: &str = include_str!("../../wit/deps/sql/database.wit");
 const EXTRA_INCLUDES_SETTING: &str = "rust-analyzer.vfs.extraIncludes";
 const FUNCTIONS_INCLUDE: &str = "${workspaceFolder}/functions";
+const LIBS_INCLUDE: &str = "${workspaceFolder}/libs";
 
 pub(crate) fn discover_functions(directory: &Path) -> Result<Vec<String>> {
     let sources = directory.join("functions");
@@ -49,6 +50,15 @@ pub(crate) fn generate(
     application: &ApplicationDefinition,
     function_names: &[String],
 ) -> Result<BTreeMap<String, String>> {
+    let libs_path = directory.join("libs/mod.rs");
+    let has_libs = match fs::metadata(&libs_path) {
+        Ok(metadata) if metadata.is_file() => true,
+        Ok(_) => bail!("{} must be a file", libs_path.display()),
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", libs_path.display()));
+        }
+    };
     let common = &application.dependencies;
     let empty = BTreeMap::new();
     let functions: BTreeMap<_, _> = function_names
@@ -91,18 +101,22 @@ pub(crate) fn generate(
         );
         files.insert(
             format!(".wr/functions/{name}/lib.rs"),
-            render_entry_point(name),
+            render_entry_point(name, has_libs),
         );
     }
     files.insert(".gitignore".to_owned(), generate_gitignore(directory)?);
     files.insert(
         ".vscode/settings.json".to_owned(),
-        generate_editor_settings(directory)?,
+        generate_editor_settings(directory, has_libs)?,
     );
     Ok(files)
 }
 
-fn generate_editor_settings(directory: &Path) -> Result<String> {
+fn generate_editor_settings(directory: &Path, has_libs: bool) -> Result<String> {
+    let mut required_includes = vec![FUNCTIONS_INCLUDE];
+    if has_libs {
+        required_includes.push(LIBS_INCLUDE);
+    }
     let path = directory.join(".vscode/settings.json");
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -128,11 +142,13 @@ fn generate_editor_settings(directory: &Path) -> Result<String> {
             .map(|element| serde_json::from_str::<String>(&element.to_string()))
             .collect::<Result<Vec<_>, _>>()
             .with_context(expected)?;
-        if !paths.iter().any(|entry| entry == FUNCTIONS_INCLUDE) {
-            includes.append(FUNCTIONS_INCLUDE.into());
+        for required in required_includes {
+            if !paths.iter().any(|entry| entry == required) {
+                includes.append(required.into());
+            }
         }
     } else {
-        settings.append(EXTRA_INCLUDES_SETTING, vec![FUNCTIONS_INCLUDE].into());
+        settings.append(EXTRA_INCLUDES_SETTING, required_includes.into());
     }
     Ok(root.to_string())
 }
@@ -280,8 +296,13 @@ fn render_function_manifest(name: &str, dependencies: Map<String, Value>) -> Res
     Ok(toml::to_string_pretty(&manifest)?)
 }
 
-fn render_entry_point(name: &str) -> String {
+fn render_entry_point(name: &str, has_libs: bool) -> String {
+    let libs = if has_libs {
+        "#[path = \"../../../libs/mod.rs\"]\npub mod libs;\n\n"
+    } else {
+        ""
+    };
     format!(
-        "wit_bindgen::generate!({{\n    path: \"../../wit\",\n    world: \"http-function\",\n    generate_all,\n}});\n\npub use exports::local::http::handler::{{Request, Response}};\npub use local::kv::store as kv;\npub use local::sql::database as sql;\n\n#[path = \"../../../functions/{name}.rs\"]\nmod function;\n\nstruct Component;\n\nimpl exports::local::http::handler::Guest for Component {{\n    fn handle(request: Request) -> Response {{\n        function::handle(request)\n    }}\n}}\n\nexport!(Component);\n"
+        "wit_bindgen::generate!({{\n    path: \"../../wit\",\n    world: \"http-function\",\n    generate_all,\n}});\n\npub use exports::local::http::handler::{{Request, Response}};\npub use local::kv::store as kv;\npub use local::sql::database as sql;\n\n{libs}#[path = \"../../../functions/{name}.rs\"]\nmod function;\n\nstruct Component;\n\nimpl exports::local::http::handler::Guest for Component {{\n    fn handle(request: Request) -> Response {{\n        function::handle(request)\n    }}\n}}\n\nexport!(Component);\n"
     )
 }

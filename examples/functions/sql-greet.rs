@@ -1,4 +1,8 @@
-use crate::{sql::{self, Statement, Value}, Request, Response};
+use crate::{
+    Request, Response,
+    libs::responses::text,
+    sql::{self, Statement, Value},
+};
 
 pub fn handle(_request: Request) -> Response {
     let statement = Statement {
@@ -13,5 +17,5 @@ pub fn handle(_request: Request) -> Response {
         Ok(None) => (404, "Greeting not found".into()),
         Err(_) => (500, "Unable to read greeting".into()),
     };
-    Response { status, headers: vec![], body: message.into_bytes() }
+    text(status, message)
 }

@@ -119,6 +119,29 @@ The manifest must still contain at least one configured function: support for
 extra unlisted sources does not imply support for a completely route-free
 application. Run serves configured functions only.
 
+### Shared application code
+
+An optional `libs/mod.rs`, beside the `functions` directory, is included as
+`pub mod libs` at the root of every generated handler crate. Handlers import
+shared items through `crate::libs`. Declare child modules with ordinary Rust
+`mod` declarations; `wr` does not discover individual files beneath `libs`.
+Shared modules can use the same `crate::Request`, `crate::Response`, `crate::kv`,
+and `crate::sql` bindings as handlers.
+
+Setup, build, and update check for the entry point. If it is absent, no shared
+module is generated, even when the `libs` directory contains other files. An
+entry point that exists but is not a file, or cannot be inspected, fails
+generation before writing. Cargo validates the module contents during build.
+Adding or removing the entry point is reflected at the next generation.
+
+Shared code is compiled separately into each handler, not into a separate
+component or a shared runtime instance. Dependencies used by shared modules
+must be available in every handler that compiles them; declare these in the
+manifest's top-level `dependencies`. Source-only changes require a rebuild but
+no lockfile update. The library sources remain author-owned and are preserved
+by setup and clean. Deployed components do not need the source directory.
+See [reuse code between handlers](guides.md#reuse-code-between-handlers).
+
 ## Dependencies
 
 Top-level `dependencies` apply to all discovered functions. Each configured
@@ -201,8 +224,10 @@ Repeated setup does not duplicate these entries. No ignore rule is added for
 `Cargo.lock`.
 
 Setup adds `${workspaceFolder}/functions` to the
-`rust-analyzer.vfs.extraIncludes` array in `.vscode/settings.json` without
-duplicating it. It preserves other include paths, unrelated settings, comments,
+`rust-analyzer.vfs.extraIncludes` array in `.vscode/settings.json`, and adds
+`${workspaceFolder}/libs` when `libs/mod.rs` is present, without duplicating
+either path. Previously added paths are retained if the shared entry point is
+removed. It preserves other include paths, unrelated settings, comments,
 and formatting. JSON comments and trailing commas are supported. Invalid
 settings or an include setting that is not an array of strings cause generation
 to fail before any files are written. See the [VS Code recipe](guides.md#prepare-vs-code)
