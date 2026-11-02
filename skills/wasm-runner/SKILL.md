@@ -66,6 +66,9 @@ from handlers. Shared modules can use the generated HTTP, KV, and SQL bindings.
 They compile within every handler crate; put their dependencies in the common
 manifest dependencies. Rebuild after source changes. These are ordinary Rust
 modules, not separate Cargo packages or deployed components.
+For simple HTML frontends, Askama can compile application-owned templates into
+the component. See [HTML templates](references/features.md#html-templates) for
+the generated configuration and dependency setup.
 
 Handlers import `Request` and `Response` from `crate`; `wr` supplies the HTTP
 server. Return expected application errors as `Response` values. Configure

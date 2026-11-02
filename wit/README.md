@@ -45,6 +45,8 @@ Function names come from source filenames. Routes belong to the application
 manifest; see [manifest and discovery rules](../docs/reference.md#source-discovery).
 For helpers shared by multiple handlers, use the optional
 [shared application modules](../docs/guides.md#reuse-code-between-handlers).
+The [Askama example](../docs/guides.md#render-html-with-askama) uses these modules
+to return rendered HTML through the same response contract.
 
 ## Execution and compatibility
 

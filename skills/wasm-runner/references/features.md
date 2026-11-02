@@ -3,6 +3,22 @@
 Read the relevant section when designing a handler or troubleshooting an
 application using the installed `wr` command.
 
+## HTML templates
+
+Askama 0.16 works as an application dependency with `default-features: false`
+and `features: [derive, alloc, config]`. Put it in common dependencies when
+shared view modules use it. Keep templates under the application's `templates/`.
+Setup generates the Askama configuration inside each handler crate, so no
+application-root configuration or relative generated paths are needed.
+
+Derive a view with `#[derive(askama::Template)]` and
+`#[template(path = "page.html")]`. Render through `askama::Template::render`, handle rendering
+errors, and return HTML bytes with `Content-Type: text/html; charset=utf-8`.
+HTML templates escape interpolated values by default; do not mark untrusted
+values safe. Templates can extend shared layouts. They are compiled into the
+component, so changes require rebuilding and restarting or redeploying. No
+runtime filesystem access, host template API, or template hot reload is provided.
+
 ## HTTP routes and request data
 
 Each configured function has one `http` mapping with a `method` and `path`.

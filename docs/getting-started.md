@@ -116,6 +116,9 @@ curl 'http://127.0.0.1:9000/demo/users/42/orders?status=open&tag=a&tag=b'
 
 Expect `Hello, world!`, the echoed JSON object, and a JSON request description
 with `user_id` equal to `42` and the two `tag` values grouped together.
+Open `http://127.0.0.1:9000/demo/` in a browser for the SQL-backed greeting page.
+It renders HTML inside the Wasm component using Askama; see the
+[templating recipe](guides.md#render-html-with-askama) to change its layout.
 Run `wr daemon stop` to stop accepting work and drain admitted executions.
 Starting again begins with no applications; run `wr deploy examples` again.
 For foreground serving, use `wr run examples --listen 127.0.0.1:9000` instead

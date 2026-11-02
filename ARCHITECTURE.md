@@ -226,6 +226,17 @@ bindings directly, without a separate guest API crate or cross-crate type
 conversion. The tradeoff is compilation in each handler's dependency context;
 this shares source, not runtime state or separately deployed components.
 
+The example's shared view module derives Askama templates at compile time and
+returns the ordinary HTTP response type. Workspace generation writes a small
+inline Askama configuration beside each handler's Cargo manifest, pointing to
+the application's template directory.
+This keeps knowledge of generated paths in the generator and lets views use
+Askama's default configuration lookup. The file is harmless when Askama is not
+a dependency, so no engine flag or conditional directory discovery is needed.
+Templates are read at build time without copying them into generated output;
+they and inherited layouts become part of the component. The runtime needs no
+rendering import or filesystem access.
+
 The original sources live outside the generated package directories. Setup
 therefore merges rust-analyzer source includes into the application's editor
 settings; Cargo resolves the source paths without that configuration. The

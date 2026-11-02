@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}Greetings · WASM Runner{% endblock %}
+
+{% block content %}
+<p class="eyebrow">The greeting room</p>
+<h1>A little hello.</h1>
+<p class="intro">A collection of greetings, ready whenever you stop by.</p>
+<section class="card" aria-labelledby="greetings-heading">
+  <h2 id="greetings-heading">Messages</h2>
+  {% if messages.is_empty() %}
+  <p class="empty">No greetings yet. Check back soon.</p>
+  {% else %}
+  <ul>
+    {% for message in messages %}
+    <li>{{ message }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

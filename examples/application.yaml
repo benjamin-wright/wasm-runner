@@ -4,7 +4,15 @@ kv: true
 sql:
   enabled: true
 
+dependencies:
+  askama: {version: "0.16", default-features: false, features: [derive, alloc, config]}
+
 functions:
+  home:
+    http:
+      method: GET
+      path: /
+
   sql-greet:
     http:
       method: GET

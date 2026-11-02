@@ -5,6 +5,7 @@ components from an application manifest. The command is `wr`. It is for
 application authors working with Rust handlers and HTTP route configuration.
 Handlers can [reuse application code](docs/guides.md#reuse-code-between-handlers)
 through an optional shared Rust module tree.
+The example includes a [SQL-backed HTML page rendered with Askama](docs/guides.md#render-html-with-askama).
 
 `wr setup` prepares a guest Cargo workspace, `wr update` creates or refreshes
 the application's dependency lockfile, `wr build` compiles components using

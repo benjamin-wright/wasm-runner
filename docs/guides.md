@@ -64,15 +64,73 @@ crate, put it in the common dependencies and run `wr update examples` before
 building. See [shared-code behavior](reference.md#shared-application-code) for
 discovery, ownership, and compilation boundaries.
 
+## Render HTML with Askama
+
+The example application serves a SQL-backed HTML page at `/demo/`. Its
+[home handler](../examples/functions/home.rs) calls the shared
+[greeting query](../examples/libs/greetings.rs), then passes the results to the
+[view](../examples/libs/views.rs). The query selects up to 100 greetings in ID
+order. An empty database shows an empty state; an unavailable query returns
+HTTP 503. Template rendering errors return HTTP 500.
+
+Askama is an ordinary application dependency. The example declares it in the
+common `dependencies` because every handler includes the shared view module:
+
+```yaml
+dependencies:
+  askama: {version: "0.16", default-features: false, features: [derive, alloc, config]}
+```
+
+Keep HTML in an application-owned `templates` directory. The example's
+[home template](../examples/templates/home.html) extends its
+[base layout](../examples/templates/base.html). Askama compiles both into the
+component and escapes interpolated HTML data by default. No template files or
+filesystem access are needed at runtime, and the page needs no browser JavaScript.
+
+Setup generates Askama configuration inside each handler crate, pointing to
+the application's `templates` directory. Each derived view needs only the
+template name:
+
+```rust
+#[derive(askama::Template)]
+#[template(path = "home.html")]
+pub struct Home<'a> {
+    pub messages: &'a [String],
+}
+```
+
+There is no application-root Askama configuration to maintain. Keep the HTML
+templates outside `.wr` so they survive cleanup; the generated configuration
+is recreated by setup or build. See the [generated-file contract](reference.md#generated-files).
+The [shared HTML helper](../examples/libs/views.rs)
+renders a view into the existing response type with
+`Content-Type: text/html; charset=utf-8`.
+
+To try the checked-in page:
+
+```sh
+wr build examples
+wr run examples --listen 127.0.0.1:9000
+```
+
+Open `http://127.0.0.1:9000/demo/`. With a fresh example database the page shows
+`Hello from SQL!`, seeded by the existing migration. For a new application or
+changed dependency declarations, run `wr update examples` before building.
+Edit a template, rebuild, and restart the foreground server to see the change;
+with a daemon, rebuild and redeploy instead. There is no template hot reload.
+Invalid templates fail compilation without replacing the published components.
+
 ## Configure dependencies
 
 Edit the application manifest, not generated Cargo manifests. To make
 `serde_json` available to every function in the checked-in example, remove its
 declarations from both `functions.echo.dependencies` and
-`functions.inspect.dependencies`, then add this top-level map:
+`functions.inspect.dependencies`, then add it to the existing top-level map,
+keeping the Askama dependency used by the shared views:
 
 ```yaml
 dependencies:
+  askama: {version: "0.16", default-features: false, features: [derive, alloc, config]}
   serde_json: "1.0"
 ```
 

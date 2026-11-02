@@ -22,6 +22,94 @@ const KV_FUNCTION: &str = include_str!("fixtures/kv.rs");
 const COUNTER_FUNCTION: &str = include_str!("../examples/functions/counter.rs");
 const SHARED_LIBS: &str = include_str!("../examples/libs/mod.rs");
 const SHARED_RESPONSES: &str = include_str!("../examples/libs/responses.rs");
+const SHARED_GREETINGS: &str = include_str!("../examples/libs/greetings.rs");
+const SHARED_VIEWS: &str = include_str!("../examples/libs/views.rs");
+const HOME_FUNCTION: &str = include_str!("../examples/functions/home.rs");
+const BASE_TEMPLATE: &str = include_str!("../examples/templates/base.html");
+const HOME_TEMPLATE: &str = include_str!("../examples/templates/home.html");
+const GREETINGS_MIGRATION: &str = include_str!("../examples/migrations/0001-greetings.apply.sql");
+
+#[test]
+fn askama_renders_sql_data_without_template_files_at_runtime() {
+    use std::time::{Duration, Instant};
+    use wasm_runner::{
+        persistence::sql::{Migration, SqlStatement, SqlStorage, SqlValue},
+        runtime::{Capabilities, Runtime},
+    };
+
+    let component = compiled_component("home");
+    let fixture = ManifestFixture::new(EXAMPLE);
+    let storage = SqlStorage::new(fs::canonicalize(&fixture.directory).unwrap().join("sql"));
+    let store = storage.application("hello").unwrap();
+    store
+        .migrate(
+            &[Migration {
+                id: 1,
+                name: "greetings".into(),
+                apply: GREETINGS_MIGRATION.into(),
+                rollback: None,
+            }],
+            None,
+        )
+        .unwrap();
+    let mut runtime = Runtime::with_capabilities(
+        Duration::from_secs(2),
+        Capabilities {
+            kv: None,
+            sql: Some(store.clone()),
+        },
+    )
+    .unwrap();
+    let id = runtime.register(component).unwrap();
+    let render = || {
+        let response = runtime.execute(&id, &guest_request("/")).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers,
+            vec![("content-type".into(), "text/html; charset=utf-8".into())]
+        );
+        String::from_utf8(response.body).unwrap()
+    };
+
+    let body = render();
+    assert!(body.starts_with("<!doctype html>"));
+    assert!(body.contains("<title>Greetings · WASM Runner</title>"));
+    assert!(body.contains("Hello from SQL!"));
+    assert!(body.contains("<footer>"));
+    let untrusted = "<script>alert(\"untrusted\")</script>&";
+    store
+        .execute(
+            &SqlStatement {
+                sql: "INSERT INTO greetings (id, message) VALUES (2, ?1)".into(),
+                parameters: vec![SqlValue::Text(untrusted.into())],
+            },
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+    let body = render();
+    assert!(body.contains("Hello from SQL!"));
+    assert!(body.contains("untrusted"));
+    assert!(!body.contains("<script>"));
+    assert!(!body.contains("</script>"));
+    assert!(!body.contains("\"untrusted\""));
+
+    store
+        .execute(
+            &SqlStatement {
+                sql: "DELETE FROM greetings".into(),
+                parameters: vec![],
+            },
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert!(render().contains("No greetings yet."));
+
+    let mut disabled = Runtime::new(Duration::from_secs(2)).unwrap();
+    let id = disabled.register(component).unwrap();
+    let response = disabled.execute(&id, &guest_request("/")).unwrap();
+    assert_eq!(response.status, 503);
+    assert_eq!(response.body, b"Unable to load greetings");
+}
 
 #[test]
 fn shared_libraries_run_in_multiple_components() {
@@ -804,8 +892,17 @@ impl ManifestFixture {
 
     fn write_shared_libraries(&self) {
         fs::create_dir_all(self.directory.join("libs")).unwrap();
-        fs::write(self.directory.join("libs/mod.rs"), SHARED_LIBS).unwrap();
-        fs::write(self.directory.join("libs/responses.rs"), SHARED_RESPONSES).unwrap();
+        fs::create_dir_all(self.directory.join("templates")).unwrap();
+        for (path, contents) in [
+            ("libs/mod.rs", SHARED_LIBS),
+            ("libs/responses.rs", SHARED_RESPONSES),
+            ("libs/greetings.rs", SHARED_GREETINGS),
+            ("libs/views.rs", SHARED_VIEWS),
+            ("templates/base.html", BASE_TEMPLATE),
+            ("templates/home.html", HOME_TEMPLATE),
+        ] {
+            fs::write(self.directory.join(path), contents).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -844,8 +941,11 @@ impl Drop for ManifestFixture {
 }
 
 fn source_application() -> ManifestFixture {
-    let fixture = ManifestFixture::new(&format!("{EXAMPLE}\ndependencies:\n  serde_json: '1.0'\n"));
+    let fixture = ManifestFixture::new(&format!(
+        "{EXAMPLE}\ndependencies:\n  serde_json: '1.0'\n  askama: {{version: '0.16', default-features: false, features: [derive, alloc, config]}}\n"
+    ));
     fixture.write_shared_libraries();
+    fs::write(fixture.directory.join("functions/home.rs"), HOME_FUNCTION).unwrap();
     fs::write(
         fixture.directory.join("functions/counter.rs"),
         COUNTER_FUNCTION,
@@ -912,6 +1012,7 @@ fn compiled_component(name: &str) -> &'static [u8] {
             "sql-test",
             "counter",
             "sql-greet",
+            "home",
         ]
         .into_iter()
         .map(|name| {
@@ -986,6 +1087,7 @@ fn setup_previews_workspace_without_writing_files() {
     for expected in [
         ".wr/functions/echo/Cargo.toml",
         ".wr/functions/greet/lib.rs",
+        ".wr/functions/greet/askama.toml",
         ".wr/wit/world.wit",
         ".vscode/settings.json",
         "${workspaceFolder}/functions",
@@ -1275,6 +1377,10 @@ fn clean_removes_generated_files_and_preserves_user_files() {
         "functions/echo.rs",
         "libs/mod.rs",
         "libs/responses.rs",
+        "libs/greetings.rs",
+        "libs/views.rs",
+        "templates/base.html",
+        "templates/home.html",
         "Cargo.lock",
         ".gitignore",
         ".vscode/settings.json",
@@ -1697,6 +1803,7 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("wr update"));
     assert!(!fixture.directory.join("Cargo.lock").exists());
     assert!(!fixture.directory.join(".wr/components").exists());
+    assert!(!fixture.directory.join("askama.toml").exists());
 
     let output = wr(&["update", fixture.directory.to_str().unwrap()]);
     assert!(
@@ -1723,7 +1830,7 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
         } else {
             "debug"
         };
-        for name in ["echo", "greet", "inspect", "unlisted-target"] {
+        for name in ["echo", "greet", "inspect", "unlisted-target", "home"] {
             let component = fs::read(
                 fixture
                     .directory
@@ -1797,16 +1904,24 @@ fn build_produces_http_components_and_preserves_outputs_on_cargo_failure() {
     let updated_lockfile = fs::read(fixture.directory.join("Cargo.lock")).unwrap();
     assert_ne!(updated_lockfile, lockfile);
     let previous = fs::read(&destination).unwrap();
-    fs::write(fixture.directory.join("libs/responses.rs"), "invalid Rust").unwrap();
-    let output = fixture.build(&[]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Built "));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Cargo build failed"));
-    assert_eq!(fs::read(destination).unwrap(), previous);
-    assert_eq!(
-        fs::read(fixture.directory.join("Cargo.lock")).unwrap(),
-        updated_lockfile
-    );
+    for (path, invalid) in [
+        ("libs/responses.rs", "invalid Rust"),
+        ("templates/base.html", "{% invalid_template_tag %}"),
+    ] {
+        let path = fixture.directory.join(path);
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, invalid).unwrap();
+        let output = fixture.build(&[]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Built "));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Cargo build failed"));
+        assert_eq!(fs::read(&destination).unwrap(), previous);
+        assert_eq!(
+            fs::read(fixture.directory.join("Cargo.lock")).unwrap(),
+            updated_lockfile
+        );
+        fs::write(path, original).unwrap();
+    }
 }
 
 #[test]

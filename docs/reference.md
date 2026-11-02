@@ -142,6 +142,20 @@ no lockfile update. The library sources remain author-owned and are preserved
 by setup and clean. Deployed components do not need the source directory.
 See [reuse code between handlers](guides.md#reuse-code-between-handlers).
 
+### HTML responses and templates
+
+Handlers can render HTML through an application dependency and return its UTF-8
+bytes with a `Content-Type: text/html; charset=utf-8` header. The runner uses the
+ordinary HTTP response contract; it has no template-engine setting or rendering
+host import. The [Askama example](guides.md#render-html-with-askama) embeds its
+templates at compile time. Setup generates Askama's default configuration in
+each handler crate, pointing to the application's `templates` directory. This
+file is unused by handlers without Askama; no manifest flag or directory
+discovery is needed. Application-owned HTML templates are preserved by setup
+and clean, and are not sent separately at deploy.
+Template changes require rebuilding components and restarting or redeploying.
+The guest's filesystem restrictions and complete-response buffering still apply.
+
 ## Dependencies
 
 Top-level `dependencies` apply to all discovered functions. Each configured
@@ -198,6 +212,7 @@ All paths below are relative to the application directory.
 | `Cargo.toml` | Generated guest workspace root; protected against overwriting a handwritten manifest. |
 | `.wr/functions/<name>/Cargo.toml` | Generated `cdylib` package for each discovered source. |
 | `.wr/functions/<name>/lib.rs` | Generated entry point that includes the original source and exports the guest handler. |
+| `.wr/functions/<name>/askama.toml` | Generated Askama configuration with `general.dirs = ["../../../templates"]`, relative to each handler crate. |
 | `.wr/wit/world.wit`, `.wr/wit/deps/kv/store.wit`, `.wr/wit/deps/sql/database.wit` | Embedded HTTP, KV, and SQL guest contracts. |
 | `.gitignore` | Existing contents preserved; required literal entries appended if missing. |
 | `.vscode/settings.json` | Existing settings merged with the source include path. |

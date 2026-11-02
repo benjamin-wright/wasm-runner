@@ -34,6 +34,8 @@ Source discovery is independent of route configuration, within the
 [manifest and discovery constraints](docs/reference.md#source-discovery).
 Handlers can reuse application-owned Rust modules through an optional
 [shared entry point](docs/reference.md#shared-application-code).
+The example demonstrates [server-rendered HTML with Askama](docs/guides.md#render-html-with-askama)
+using ordinary application dependencies and the existing HTTP contract.
 
 ## Implemented requirements
 
@@ -64,6 +66,16 @@ removal, preserves source files, and supports editor discovery. Covered by
 `setup_refreshes_optional_shared_library_entry_point`, the preview/repeatability
 and cleanup cases, and the component build case, including shared-source
 compilation failure without replacing published components.
+
+Template-example acceptance: setup supplies Askama configuration within each
+generated handler crate, so views need only the template filename and no
+application-root configuration. The SQL-backed page renders an inherited HTML
+layout, escapes database text, handles empty results and unavailable SQL, and
+executes without source templates on disk. Covered by
+`askama_renders_sql_data_without_template_files_at_runtime`. The component
+build workflow also rejects invalid inherited templates without replacing
+published components, and cleanup preserves the template inputs. This does not
+add a host rendering API, static file hosting, or template hot reload.
 
 Failure behavior, output paths, and preservation rules in the reference are
 part of these commitments even where the table summarizes them. Filesystem
