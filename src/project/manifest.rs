@@ -40,6 +40,23 @@ pub(crate) struct ApplicationDefinition {
     #[serde(default)]
     pub dependencies: Dependencies,
     pub functions: HashMap<String, FunctionDefinition>,
+    pub publish: Option<Publish>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Publish {
+    pub registry: String,
+    pub version: String,
+}
+
+impl ApplicationDefinition {
+    pub fn runtime_config(&self) -> serde_json::Value {
+        let functions: serde_json::Map<String, serde_json::Value> = self.functions.iter().map(|(name, function)| {
+            (name.clone(), serde_json::json!({"http": {"method": function.http.method.to_string(), "path": function.http.path}}))
+        }).collect();
+        serde_json::json!({"name": self.name, "path-prefix": self.path_prefix, "kv": self.kv, "sql": self.sql, "functions": functions})
+    }
 }
 
 #[derive(Deserialize)]
@@ -84,7 +101,12 @@ impl fmt::Display for HttpMethod {
 }
 
 pub(crate) fn load(directory: &Path) -> Result<ApplicationDefinition> {
-    let path = directory.join("application.yaml");
+    let path = if directory.is_file() {
+        directory.to_path_buf()
+    } else {
+        directory.join("application.yaml")
+    };
+    let directory = path.parent().expect("manifest parent");
     let source = fs::read_to_string(&path)
         .with_context(|| format!("reading manifest {}", path.display()))?;
     let mut application =
@@ -118,7 +140,7 @@ pub(crate) fn load(directory: &Path) -> Result<ApplicationDefinition> {
     Ok(application)
 }
 
-fn parse(source: &str) -> Result<ApplicationDefinition> {
+pub(crate) fn parse(source: &str) -> Result<ApplicationDefinition> {
     let mut yaml: yaml_serde::Value = yaml_serde::from_str(source)?;
     yaml.apply_merge()?;
     let value = yaml_serde::from_value(yaml)?;

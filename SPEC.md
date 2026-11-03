@@ -22,11 +22,12 @@ handlers against the guest contract, preview or write a generated workspace,
 explicitly update dependencies, build components with locked dependencies by
 default, serve configured HTTP endpoints, and clean generated outputs.
 A reusable synchronous runtime and a CLI-independent HTTP server support
-embedding applications as well as the CLI. On Unix, a background daemon hosts
-multiple applications at declarative, nonoverlapping path prefixes on one HTTP listener, with a private control socket for
-atomic deployment, listing, removal, status, and shutdown. Deployments are
-in-memory and must be resubmitted after restarting the daemon. A foreground
-`wr admin` client serves a local, read-only browser view of live daemon metadata.
+embedding applications as well as the CLI. Both local `wr run` and production
+`wr start` stay in the foreground. Production follows public Git configuration
+and application manifests, downloads complete OCI releases, and reconciles
+applications at nonoverlapping path prefixes. Verified releases and accepted
+membership survive restart in a private, exclusively locked state directory.
+An optional loopback admin listener provides live metadata and health endpoints.
 Applications can opt into persistent typed KV values and atomic counters, or
 application-scoped SQL databases with deployment migrations;
 storage identity and inspection survive application removal and replacement.
@@ -81,81 +82,26 @@ Failure behavior, output paths, and preservation rules in the reference are
 part of these commitments even where the table summarizes them. Filesystem
 writes, removal, and publication are not promised to be transactional.
 
-### Daemon requirements
+### Production reconciliation and local hosting
 
-| ID | Requirement | Observable acceptance condition and coverage |
+| ID | Requirement | Observable acceptance condition |
 | --- | --- | --- |
-| R11 | Separate daemon lifecycle from application deployment. | `daemon start` returns after both listeners are bound, or succeeds by reporting an already running instance without changing its address or applications. `status` queries the live process, and `stop` waits for listener closure and execution draining. Failed startup leaves no new live daemon. `daemon_lifecycle_owns_both_listeners_and_restarts_empty` covers process lifecycle, repeated starts, failed binding, socket permissions, singleton ownership, and stale-socket recovery; the deployment workflow checks preservation of deployments on repeated start. Draining active executions remains a manual scenario. |
-| R12 | Host independently managed applications without interrupting unrelated routes. | A deployment contains identity, an explicit path prefix, routes, and component bytes. Invalid components, internal route collisions, or overlapping prefixes leave all active applications unchanged. Replacement and removal affect future requests; requests already using a generation retain it. The deployment workflow covers two applications, failed and successful replacements, concurrent requests, removal, independence from source paths, and empty restart; replacing an executing generation remains a manual scenario. |
-| R13 | Declare application mount points without deployment flags or retained defaults. | Every manifest requires a canonical `path-prefix`. Run and deploy serve application-relative routes beneath it and strip the prefix before guest execution. Different applications may share function paths but cannot have equal or nested prefixes. Listing/status show current prefixes. Prefix changes publish atomically with the application, and failures preserve old mounts. `manifests_require_literal_canonical_path_prefixes` covers input constraints; the deployment workflow covers prefix routing, capture/query preservation, boundaries, root mounts, conflicts, replacement, and removal. |
+| R11 | Leave process supervision to the environment. | Run and start remain in the foreground; SIGINT/SIGTERM drain work and release the state lock. Two processes cannot own one state directory, including applications with no persistence enabled. Local run accepts a manifest path and a loopback port override. |
+| R12 | Reconcile authorized application releases independently. | The deployment file controls membership; each registered branch's application manifest authorizes its version and runtime configuration. Missing or invalid upstream inputs preserve active applications. Pending releases retry without another Git change; failures for one application do not prevent others from updating. |
+| R13 | Preserve explicit mount and generation semantics. | Manifest prefixes remain canonical and nonoverlapping. Successful replacements affect new requests; existing requests retain their generation. Invalid components, routes, prefixes, and migration history cannot replace active routes. Removal retains persistent data. |
+| R14 | Expose read-only operational information. | Optional loopback admin pages show applications, handler metrics, storage, and desired/active release status. JSON status includes the local application for run, with absent Git and release metadata. Liveness is distinct from application readiness. There are no mutation endpoints or private control socket. |
+| R15 | Deploy complete, immutable artifact sets. | Package exports deterministic OCI layouts without building or pushing. The release record binds normalized runtime configuration, version, source commit, and child digests. Mismatched configuration, corrupt artifacts, and reassigned observed versions fail before installation. CI publishes the release record last. |
+| R16 | Recover accepted deployment state. | Cached active releases can restore without upstream access, subject to runtime and database validation. Accepted removals survive restart. A state directory cannot silently switch config sources. Database commit and cache persistence are not a distributed transaction. |
 
-The deployment workflow is independently covered by
-`deployment_replacement_preserves_routes_and_admin_metrics`. It shares compiled
-component bytes with other hosting tests, but uses its own application files,
-daemon, and admin listener.
-
-### R14: Local administration UI through the client
-
-Let authors inspect the running daemon and its deployed applications in a
-browser through a lightweight, read-only UI started by the `wr` client. The
-client queries the selected daemon over its existing private control socket
-and renders simple HTML pages on the server. The daemon remains the source of
-live metadata; the client owns presentation and the UI listener.
-
-Observable acceptance conditions:
-
-- `wr admin` starts the UI in the foreground on a loopback-only HTTP
-  listener and reports its URL after binding succeeds. It uses the existing
-  daemon selection rules described in the
-  [reference](docs/reference.md#daemon-and-deployment).
-- Pages show the daemon's PID and hosting address, and deployed application
-  names and path prefixes in a stable order. Each application lists its deployed
-  functions by name, with HTTP methods and application-relative route paths.
-  Each function headlines rolling minimum/maximum latency and links to its
-  own metrics page with completed call count, min/max/mean latency, and HTTP
-  response code counts. Empty windows show no latency measurement. Windows
-  expire during idle inspection and use bounded memory independent of traffic.
-  Metrics belong to active deployment generations: successful replacement
-  resets them, failed replacement preserves them, and removal/restart discards
-  them. Old-generation completions cannot affect new-generation metrics.
-  Database-wide KV metrics appear under Daemon. KV-enabled applications show
-  their keyspace file size in a column; other per-keyspace metrics are omitted.
-  Retained-only owners appear once, marked Disabled, with their file size.
-  An empty daemon is explicitly shown as having no deployed applications.
-- Loading or automatically refreshing a page queries live daemon metadata, so subsequent
-  requests reflect deployments, replacements, and removals without restarting
-  the UI. The browser refreshes every five seconds after a page load, including
-  error pages, without a manual Refresh button. Inspection does not require application source directories or local
-  build outputs.
-  Refresh fetches fresh metadata even after following the Applications fragment
-  link; fragment navigation must not substitute for a new page request.
-- An unavailable daemon or failed metadata request produces a clear error
-  within a bounded time, rather than displaying stale data as current. A later
-  page request can recover when the daemon becomes available.
-- Navigation and refresh work without browser JavaScript. Templates and styles
-  are bundled with `wr`, with no separate asset installation or runtime CDN
-  dependency. Metadata is escaped when rendered into HTML.
-- The UI listener is separate from the daemon's application hosting listener,
-  so deployed routes, including a root mount, cannot conflict with UI pages.
-  Stopping the UI closes its listener without stopping or changing the daemon
-  or its deployments.
-
-The initial UI provides inspection only. Browser-initiated deployment, removal,
-and daemon lifecycle changes, remote access, logs, and persistent metrics history
-are outside this requirement. The [admin reference](docs/reference.md#admin-ui)
-defines command options, page responses, and timeouts. Coverage in
-`admin_ui_reports_live_status_and_recovers` checks startup, metadata, errors,
-escaping, recovery, and independent shutdown; `admin_ui_cancels_stalled_metadata_requests`
-checks the control deadline and connection cancellation. The existing
-deployment workflow checks live deployment, replacement, removal, root
-mounts, and independence from local build outputs. It also checks function
-names, ordering, methods, escaped dynamic paths, and metadata preservation on
-failed deployment and refresh after replacement or removal.
-Handler metrics coverage extends that workflow with empty windows, GET/HEAD
-counting, guest response codes, per-handler links, and generation resets.
-`daemon_kv_preserves_data_and_reports_live_metrics` checks trap and timeout
-response counts. The metrics window test checks aggregation, boundary expiry,
-and idle recovery without sleeping.
+Reconciliation behavior is covered through the small repository-file, artifact,
+and application-host interfaces in [deployment tests](src/deployment/tests.rs).
+These tests mock observations and host outcomes; they do not simulate Git or OCI
+protocols. The concrete transport adapters rely on live operation rather than
+protocol mocks or adapter-specific manual checklists. Existing CLI, runtime, and
+persistence tests retain real component and database coverage. Local CLI coverage includes state ownership, port overrides, admin hosting,
+and deterministic packaging (`foreground_serving_honors_application_prefix` and
+`package_exports_a_complete_deterministic_release_without_building`).
+Exact production behavior belongs in the [reference](docs/reference.md#start).
 
 ## Persistent application KV
 
@@ -183,7 +129,7 @@ KV persistence does not persist deployments.
   A later trap, timeout, or disconnect does not undo accepted writes.
   Graceful shutdown drains preparation and executions and explicitly syncs.
   No per-mutation power-loss durability or bounded I/O latency is promised.
-- Previously built HTTP-only components work. YAML and control messages validate
+- Previously built HTTP-only components work. YAML and deployment inputs validate
   the capability flag; every guest call checks its bound capability.
 - Inspection retains inactive keyspaces and reports operation counts/errors,
   timings, estimated entry counts, keyspace and database sizes, and sync outcomes. Unavailable
@@ -192,10 +138,8 @@ KV persistence does not persist deployments.
 Coverage uses [public storage tests](tests/storage.rs) and real components and
 process workflows in [CLI tests](tests/cli.rs). Operational slow-storage and
 power-loss validation remain [manual procedures](docs/guides.md#observe-kv-storage).
-`runtime_kv_isolates_calls_and_preserves_accepted_writes`,
-`daemon_kv_preserves_data_and_reports_live_metrics`, and
-`foreground_kv_survives_restart_and_clean` independently cover runtime,
-daemon, and foreground behavior. `runtime_accepts_pre_sql_components` compiles frozen HTTP-only and HTTP/KV
+`runtime_kv_isolates_calls_and_preserves_accepted_writes` and
+`foreground_kv_survives_restart_and_clean` cover runtime and foreground behavior. `runtime_accepts_pre_sql_components` compiles frozen HTTP-only and HTTP/KV
 interfaces and checks backward compatibility.
 These tests do not establish production latency targets.
 
@@ -240,16 +184,14 @@ Acceptance conditions:
   and nested queries do not wait while holding cursors against an exhausted pool.
   Waiting retains the host's bounded execution permits. SQL 0.1.0 callers must
   rebuild for the cursor API; existing HTTP-only and KV components remain valid.
-- SQL state and the current migration ID are visible through daemon status and
-  admin inspection, independently of generation metadata. Retained databases
+- SQL state and the current migration ID are visible through admin inspection, independently of generation metadata. Retained databases
   are discovered on the first SQL-enabled opening after restart.
 
 Public persistence coverage lives in [SQL tests](tests/sql.rs). Real components
 and process workflows in [CLI tests](tests/cli.rs) cover
 `runtime_sql_checks_capabilities_and_preserves_committed_writes`,
-`sql_deployment_validates_before_migrating_and_preserves_history`, and
 `foreground_sql_migrates_and_preserves_data_across_restart_and_clean`.
-Existing compatibility and deployment tests continue to protect HTTP/KV clients.
+Existing compatibility and foreground tests continue to protect HTTP/KV clients.
 Disk-stall, power-loss, and application-specific schema compatibility remain
 operational validation responsibilities, not automated guarantees.
 
@@ -258,9 +200,8 @@ operational validation responsibilities, not automated guarantees.
 This increment does not provide non-HTTP event triggers.
 The custom guest interface is not WASI HTTP. Prebuilt module declarations,
 automatic builds on run, automatic prerequisite installation, file watching,
-streaming, TLS configuration, rate limiting, custom schedulers, persistent
-deployments, remote control administration, automatic startup at login/boot,
-Windows daemon support, per-application resource quotas, and unsupported
+streaming, TLS configuration, rate limiting, custom schedulers, private repository/registry access, artifact pushes, remote mutation administration,
+automatic startup at login/boot, static-file hosting, per-application resource quotas, and unsupported
 dependency forms are outside the current contract. See the
 [reference](docs/reference.md) for exact input and host capability constraints.
 

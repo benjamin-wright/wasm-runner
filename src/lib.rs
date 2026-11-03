@@ -1,8 +1,6 @@
-#[cfg(unix)]
 mod admin;
 mod cli;
-mod control;
-mod daemon;
+mod deployment;
 mod hosting;
 mod identifier;
 pub mod persistence;

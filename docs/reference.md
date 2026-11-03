@@ -8,28 +8,25 @@ the authoritative field and guest-interface definitions.
 
 ## Commands
 
-Application filesystem commands require an application directory, supplied as a
-relative or absolute path. Setup, build, update, run, and deploy read
-`application.yaml` inside it; alternate manifest filenames are not supported.
-Clean does not load a manifest.
+Setup, build, update, and clean take an application directory. Run and package
+accept either a directory containing `application.yaml` or a manifest file;
+local component and migration paths resolve relative to that manifest.
 
 | Invocation | Behavior and options |
 | --- | --- |
-| `wr setup <DIRECTORY> [--dry-run]` | Generate the guest workspace, or preview paths and contents without writing. |
-| `wr build <DIRECTORY> [--release] [--unlocked]` | Refresh the workspace and compile components using an up-to-date guest lockfile. Debug is the default; `--release` selects optimization; `--unlocked` explicitly permits lockfile changes. |
-| `wr update <DIRECTORY>` | Refresh the workspace and create or update the guest lockfile to the newest compatible dependency versions, without building components. |
+| `wr setup <DIRECTORY> [--dry-run]` | Generate or preview the guest workspace. |
+| `wr build <DIRECTORY> [--release] [--unlocked]` | Generate and compile with locked dependencies by default. |
+| `wr update <DIRECTORY>` | Explicitly refresh application dependencies without compiling. |
 | `wr clean <DIRECTORY>` | Remove generated workspace files and build outputs. |
-| `wr run <DIRECTORY> [--listen <IP:PORT>]` | Serve previously built handlers. The listener defaults to `127.0.0.1:8080`. |
-| `wr daemon start [--listen <IP:PORT>]` | Report an already running daemon, or start a Unix background daemon with an empty application registry. New instances default to `127.0.0.1:8080`. |
-| `wr daemon status` | Query the live daemon's PID, hosting address, and deployed applications. |
-| `wr daemon stop` | Stop accepting work, drain executions, and wait for the daemon to release its listeners and process lock. |
-| `wr deploy <DIRECTORY>` | Upload existing built components and atomically create or replace the named application. |
-| `wr apps list` | Print name and path prefix separated by a tab, one application per line, sorted by name. |
-| `wr remove <NAME>` | Remove the application's routes; already selected generations remain alive until their requests finish. |
-| `wr admin [--listen <IP:PORT>]` | Serve a local, read-only daemon overview in the foreground. Defaults to an available port on `127.0.0.1`. See [Admin UI](#admin-ui). |
+| `wr run <PATH> [--port <PORT>] [--listen <IP:PORT>]` | Serve local built components in the foreground. Port and listen are mutually exclusive; the default is loopback port 8080. |
+| `wr package <PATH> --source-commit <SHA> --output <NEW_DIRECTORY>` | Write OCI layouts for CI to upload; never builds or pushes. |
+| `wr start --config-repo <URL> --state-dir <DIRECTORY>` | Reconcile public Git and OCI releases in the foreground. |
 
-Daemon operations and the admin UI accept the global `--state-dir <DIRECTORY>` option. See
-[daemon and deployment](#daemon-and-deployment) for lifecycle and transport details.
+Both hosts accept `--admin-listen <LOOPBACK_IP:PORT>` for a separate read-only
+inspection listener. The global `--state-dir` overrides `WR_STATE_DIR`.
+Run defaults to `<application-directory>/.wr-data`; start requires an explicit
+state directory or the environment variable. Directories must be private
+(mode 0700 on Unix). See [Start](#start) and [Admin UI](#admin-ui).
 
 Use `wr --help`, `wr --version`, or `wr <COMMAND> --help` to inspect the CLI.
 Arguments after `wr` go directly to the application.
@@ -44,7 +41,7 @@ it defaults to false. Every configured function declares an HTTP method/path pai
 are lowercase identifiers of 1 to 64 letters, digits, or hyphens, starting with
 a letter.
 
-`path-prefix` is the application's mount point for both `wr run` and `wr deploy`.
+`path-prefix` is the application's mount point for both `wr run` and `wr start`.
 Use `/` for root hosting or a slash followed by nonempty literal segments, such
 as `/demo` or `/api/orders`. Segments may contain ASCII letters, digits, `-`, `_`,
 `.`, and `~`, but cannot be `.` or `..`. Trailing or repeated slashes, percent
@@ -176,11 +173,11 @@ A schema-valid manifest alone does not guarantee that setup or build succeeds.
 
 | Stage | Commands | Checks |
 | --- | --- | --- |
-| Manifest loading | setup, build, update, run, deploy | Parse YAML, resolve merges, validate against the embedded schema, deserialize, parse route URIs with Rocket, and check configured source files exist. |
+| Local manifest loading | setup, build, update, run, package | Parse YAML, resolve merges, validate against the embedded schema, deserialize, parse route URIs with Rocket, and check configured source files exist. |
 | Discovery and generation | setup, build, update | Validate discovered source names and require sources; reject reserved or conflicting dependencies; merge ignore rules and validate editor settings. |
 | Workspace writing | setup without `--dry-run`, build, update | Refuse a handwritten root Cargo manifest before any writes; then create or update generated files. |
 | Server preparation | run | Read every configured component, validate imports and the guest contract, compile native code, let Rocket reject route collisions, then bind the listener. |
-| Deployment preparation | deploy | Read configured components, upload routes and bytes, then let the daemon validate and compile components and reject internal route collisions and overlapping application prefixes before publishing. |
+| Deployment preparation | start | Validate the authorized manifest and complete OCI release, then compile components and reject route/prefix collisions before migration and publication. |
 | Compilation and publication | build | Cargo checks Rust and dependencies; after successful compilation, require every expected artifact before copying components. |
 | Dependency update | update | Cargo resolves dependency versions allowed by the generated manifests and writes the application lockfile. |
 | Cleanup | clean | Require an existing directory and check root Cargo manifest ownership before any removals. |
@@ -436,8 +433,7 @@ functions share the keyspace named by its validated manifest `name`. Guests
 receive only that capability, never a database path or a keyspace selector.
 The versioned [KV WIT](../wit/deps/kv/store.wit) is exported to Rust handlers as
 `crate::kv`; the HTTP export remains `local:http/handler@0.2.0`. Previously built
-HTTP-only components continue to work. Upgrade the CLI and daemon together:
-older daemons reject deployment messages containing the new capability flag.
+HTTP-only components continue to work. Local and production hosts use the same capability validation.
 
 ### Operations and errors
 
@@ -460,8 +456,8 @@ The capability is checked before every operation, including invalid arguments.
 
 | Host | Database directory | Keyspace |
 | --- | --- | --- |
-| Daemon | `<state-dir>/kv/` | Manifest name |
-| `wr run` | `<application-directory>/.wr-data/kv/` | Manifest name |
+| `wr start` | `<state-dir>/kv/` | Manifest name |
+| `wr run` | `<application-directory>/.wr-data/kv/` by default, or `<state-dir>/kv/` | Manifest name |
 | `server::serve_with_storage` | Explicit root argument | `application` |
 
 The database opens lazily when preparing the first enabled application, before
@@ -475,10 +471,10 @@ may leave a new database or empty keyspace; it never clears existing values.
 Changing routes, prefixes, components, or deployment source location preserves
 the keyspace. Renaming selects another keyspace and retains the old one.
 Removal and disabling retain data and handles. Old in-flight generations may
-still write. Clean preserves `.wr-data/` and does not touch daemon data. There
+still write. Clean preserves `.wr-data/` and does not touch production data. There
 is no reset/delete-database command, multi-process sharing, or automatic data
 deletion. For offline backup, stop the owner and copy the entire database
-directory. Deployments themselves still start empty after daemon restart.
+directory. Production restores accepted registrations and verified active releases from its state directory.
 
 ### Durability and deadlines
 
@@ -506,14 +502,13 @@ this sync boundary.
 
 ### Inspection and alpha limits
 
-`Storage::inspect` and daemon status expose retained
+`Storage::inspect` and the admin overview expose retained
 keyspaces, operation counts/failures, total and maximum elapsed microseconds,
 estimated entry counts, database disk bytes, journal count, and storage errors.
-The storage API and daemon status also expose explicit sync count, failures,
+The storage API and the admin overview also expose explicit sync count, failures,
 last duration, and result for the current host lifetime. These reset on restart;
-they do not describe the previous daemon's shutdown. Actual shutdown outcomes and durations
-are recorded in the daemon log. Foreground hosts log metadata every 30 seconds
-and sync outcomes at shutdown. All counters reset on restart.
+they do not describe the previous host's shutdown. Actual sync outcomes and
+durations are logged to stderr at shutdown. All counters reset on restart.
 Existing keyspaces are discovered when the
 database first opens after restart; inspection alone does not open storage.
 
@@ -556,9 +551,9 @@ filenames, empty files, and rollback files without an apply file are rejected.
 A missing directory means an empty migration list. Each file is limited to
 1 MiB; at most 1,000 migrations and 8 MiB of combined SQL text are accepted.
 
-Run and deploy load these files alongside existing components. Deploy sends
-structured migration records in its bounded control message, without source
-paths or an archive. Setup, build, and update do not execute migrations.
+Run loads these files alongside existing components. Package writes structured
+migration records as one OCI artifact; production loads it from the release.
+Setup, build, update, and package do not execute migrations.
 
 The runner records each applied migration's ID, name, and separate SHA-256 hashes
 of exact apply/rollback bytes in a protected database table. Once applied, names
@@ -663,13 +658,14 @@ Typed errors are `disabled`, `invalid-statement`, `denied`, `constraint`, `busy`
 contents. The application chooses their HTTP mapping. Previously built HTTP-only
 and KV components remain compatible. The cursor contract is
 `local:sql/database@0.2.0`; components importing SQL 0.1.0 must be rebuilt and use
-cursor iteration. Upgrade CLI and daemon together.
+cursor iteration. Rebuild old SQL components before deploying them.
 
 ### SQL storage and inspection
 
 SQLite is bundled with the runner. Each application has a separate database at
-`<state-dir>/sql/<name>/data.sqlite` for the daemon, or
-`<application-directory>/.wr-data/sql/<name>/data.sqlite` for foreground run.
+`<state-dir>/sql/<name>/data.sqlite` for production, or
+`<application-directory>/.wr-data/sql/<name>/data.sqlite` by default for local run.
+A local `--state-dir` override uses the same SQL layout beneath that directory.
 The validated application name determines identity. Replacement, prefix changes,
 removal, disabling, and cleanup preserve data; renaming selects another database.
 Capabilities retain an exclusive ownership lock. Managed directories reject
@@ -710,68 +706,35 @@ basic operation context; no particular error-location format is guaranteed.
 
 ## Admin UI
 
-`wr admin` requires Unix and serves a read-only browser overview of the selected
-daemon. It runs in the foreground on a separate HTTP listener. `--listen` takes
-a numeric loopback IP and port, defaults to `127.0.0.1:0`, and accepts port zero
-to select an available port. Non-loopback addresses are rejected. Rocket
-configuration files and environment variables do not override these settings.
+Pass `--admin-listen 127.0.0.1:9001` to run or start. Port zero selects an
+available port. Only loopback addresses are allowed. The host owns this listener
+and closes it during shutdown; listener failure stops the whole host. There is
+no separate admin process or control socket.
 
-After binding, the command prints `Admin UI listening on http://<IP:PORT>`.
-Open that URL in a browser; the command does not launch one automatically. A
-bind failure exits with an error and no readiness message. The daemon need not
-be running to start the UI. Selection follows the same `--state-dir`,
-`WR_STATE_DIR`, and default-directory rules as
-[daemon commands](#daemon-and-deployment). The UI does not create daemon state
-or start the daemon.
+`GET /` returns the live application overview, PID, hosting address, KV/SQL
+storage information, and deployment status. Active functions link to
+`/applications/<application>/handlers/<handler>` for rolling metrics. Missing
+handlers return 404. The page includes retained storage owners after removal.
+HTML is escaped, assets are embedded, and pages refresh every five seconds via
+an HTTP Refresh header. Responses use `Cache-Control: no-store` and a restrictive
+Content Security Policy. Storage inspection has a five-second deadline; failure
+returns an HTML 503. No credentials, components, or application data values are
+exposed.
 
-`GET /` queries the private control socket for live status and returns HTML
-showing the daemon PID, hosting address, and application names and path prefixes
-sorted by name. Each application includes its deployed functions sorted by name,
-with their HTTP methods and application-relative route paths (before the
-application's path prefix is applied). Dynamic captures are displayed literally.
-Each function shows its rolling minimum and maximum latency and links to
-`GET /applications/<application>/handlers/<handler>`. This detail page shows
-completed call count, minimum/maximum/mean latency, and counts by HTTP response
-code. A handler that is no longer deployed returns an HTTP 404 page. Both views
-use the [handler metrics](#handler-metrics) below.
-The Daemon section includes database-wide KV statistics. Each application's
-row groups its routes and a Keyspace file bytes column, which shows file size
-for KV-enabled applications and a dash for deployed applications with KV off.
-Other per-keyspace metrics are not displayed in the admin UI.
-Names present only in retained
-keyspaces also appear with their retained file size, marked Disabled with no active prefix or functions.
-Deployed applications are marked Enabled, independently of their KV capability.
-The application count includes both groups, each name appearing once.
-The SQL column shows capability status, the database migration ID, database file
-bytes, and operation failures, including retained databases. SQL schema state is
-independent of the active generation. Metric definitions are in
-[KV inspection](#inspection-and-alpha-limits) and [SQL inspection](#sql-storage-and-inspection).
-Only deployed functions appear; source files without configured routes are not
-deployed. An empty registry is shown explicitly. The browser reloads the page
-five seconds after each load using an HTTP `Refresh` header, querying current metadata
-without a Refresh button. Error pages use the same automatic refresh, allowing
-recovery after a daemon restart. This refresh reloads the whole page.
-The refresh URL explicitly preserves the page path and query, omitting any
-fragment such as `#applications` so browsers fetch fresh metadata instead of
-performing an in-page navigation. The first refresh after following a fragment
-link therefore returns to the top of the page. `GET /style.css`
-serves the bundled stylesheet. Rocket supplies HEAD fallback. No browser
-JavaScript, external assets, application source directories, or local build
-outputs are required.
+`GET /status` returns JSON with `config_commit`, `last_poll` (Unix seconds),
+`last_successful_poll` (Unix seconds), `error`, `ready`, and per-application `source_commit`, `desired_version`,
+`active_version`, `active_digest`, and `error`. These describe the latest
+observation; a nonempty error does not imply that the active application stopped.
+`GET /live` returns 200 while the listener runs. `GET /ready` returns 200 once
+every accepted registration has an active application, including validated cache
+restoration, or 503 while one is missing. A pending replacement or upstream
+outage does not remove a previously active application from readiness. An
+explicitly empty accepted deployment is ready. A fresh host with no accepted
+configuration is not ready. Local run is ready after successful preparation.
+Its status includes the local application by name; Git, polling, and release
+metadata remain null because local run serves built components directly.
 
-The control exchange has a five-second deadline. Unavailable, malformed,
-unexpected, or timed-out replies produce an HTTP 503 error page; a timeout
-closes the control connection. Each later page request retries independently,
-so the UI can recover after a daemon restart. Responses use `Cache-Control:
-no-store`, and errors never display an earlier successful snapshot as current.
-Metadata and diagnostic text are HTML-escaped.
-
-The UI has no deployment, removal, or daemon lifecycle actions. SIGINT (Ctrl-C)
-or SIGTERM closes its listener and allows in-flight metadata requests to finish
-within their deadline. This leaves the daemon and its applications running.
-The UI never occupies application routes, even when an application owns `/`.
-It provides local inspection only, with no remote or multi-user administration
-contract. See the [browser inspection recipe](guides.md#inspect-the-daemon-in-a-browser).
+There are no mutation, deployment, removal, or shutdown endpoints.
 
 ### Handler metrics
 
@@ -798,117 +761,146 @@ Minimum, maximum, and arithmetic mean latency are reported in milliseconds.
 An empty window has zero calls, no response code counts, and `null` latencies
 (shown as a dash in the UI). These are window counts, not lifetime totals.
 Metrics belong to the deployed generation: successful replacement resets them,
-failed replacement preserves them, and removal or daemon restart discards them.
+failed replacement preserves them, and removal or host restart discards them.
 In-flight old-generation requests cannot contribute to the replacement's window.
 The admin detail page refreshes and handles metadata failures exactly like the
 overview; it does not maintain its own metrics cache.
 
-## Daemon and deployment
+## Start
 
-These commands currently require Unix (including macOS and Linux). The daemon is
-one background process with two listeners: an HTTP hosting listener and a private
-Unix control socket. It does not install a login service or restart itself after
-failure. `wr run` remains available for foreground, single-application serving.
+```sh
+wr start --config-repo https://example.com/team/deploy.git \
+  --config-branch main --config-path deploy/config.yaml \
+  --state-dir /var/lib/wr --listen 127.0.0.1:8080 \
+  --admin-listen 127.0.0.1:9001 --poll-interval 30
+```
 
-State-directory selection is `--state-dir`, then `WR_STATE_DIR`, then
-`$HOME/.wr/daemon`. Relative paths resolve against the invoking working directory.
-Use the same directory for all commands targeting a daemon. The directory is
-created with mode 0700; an existing directory with group/other permissions or a
-symlink is rejected. It contains `control.sock` (mode 0600), `daemon.lock`, and
-an append-only `daemon.log`. The full socket path must fit the platform's Unix
-socket path limit (less than 104 bytes on macOS). Use a shorter state directory
-if binding reports a path-length error. A different state directory selects a
-separate daemon, whose hosting address must also be available.
+Branch defaults to `main`, path to `config.yaml`, polling to 30 seconds, and
+hosting to `127.0.0.1:8080`. Poll intervals are positive whole seconds. The legacy
+spellings `--config_repo` and `--config_branch` are accepted aliases. The
+repository URL is separate from the path inside the repository.
 
-`start` first queries the selected control socket. If a daemon responds, it
-succeeds and reports that instance's PID and actual hosting address without
-spawning a process or changing its applications. `--listen` only applies to new
-instances; stop the existing daemon first to change its address. A missing or
-refused socket connection proceeds with startup; other control errors fail the
-command. The process lock still prevents duplicate instances if starts race;
-a concurrent start whose daemon is not yet ready may need retrying.
+The deployment file requires an explicit application map:
 
-For a new instance, `start` waits up to 30 seconds for both listeners to bind. It prints the hosting
-address, control socket, and log location. Port zero selects an available hosting
-port. Startup failure prints no successful readiness and terminates/reaps the
-child; diagnostics are in the log. A process-held file lock prevents duplicate
-instances. A stale socket is removed only after acquiring that lock; a non-socket
-file at that path is rejected. The lock file itself remains after shutdown.
-The daemon uses a separate process group and has no terminal input.
+```yaml
+applications:
+  greetings:
+    repo: https://example.com/team/greetings.git
+    branch: main
+    path: application.yaml
+```
 
-`status` queries the live control server, rather than trusting a PID file. An
-unreachable daemon is a command failure. `stop` requests graceful shutdown and
-waits up to 120 seconds for release of the process lock. New deployments and
-executions are rejected during shutdown. Already admitted executions and pending
-control work are drained; control reads/writes have 30-second deadlines. SIGINT
-and SIGTERM use the same shutdown path. Stopping an absent daemon fails.
+Registration names follow the application identifier rules and must match the
+manifest's name. Repository paths are relative, without empty or dot segments.
+URLs require HTTPS; loopback HTTP is supported for local services.
+Embedded credentials, URL queries, private authentication, SSH, hooks, submodules,
+and checkout builds are not supported. Git must be on PATH. WR uses private bare
+repositories, reads files from resolved commits, and disables interactive
+credentials and system/global Git configuration. Fetching retrieves the selected
+branch history; there is no shallow-clone or disk-quota promise.
 
-`deploy` loads the manifest and configured sources using the usual validation,
-then reads existing component files. It neither runs Cargo nor generates files.
-The control payload contains the manifest's application name, required
-`path-prefix`, the optional boolean `kv` flag (absent means false), the SQL configuration
-and migration records, named method/path routes, and component bytes; source paths and
-build dependencies are not sent.
-The server independently validates names, methods, route syntax, component
-compatibility, internal route collisions, and prefix ownership. Application and
-handler names use the manifest identifier constraints. At least one handler is required.
+A poll reads the deployment file and each registered manifest from its branch.
+Repository/branch reads share fetched commits within a poll; authorization is
+refetched after artifact downloads before activation. Unchanged runtime
+configuration and release identity preserve the active generation and metrics.
+An application can change independently of the deployment file. Runtime changes
+require a new `publish.version`. Unrelated source/build metadata changes do not
+cause replacement. A registry publication alone does not authorize deployment.
 
-Application names are deployment identities: deploying an existing name replaces
-its complete prefix/route/component set, and renaming it creates another application.
-Function routes use Rocket ranking and collision rules within each application.
-Preparation, compilation, route validation, and prefix ownership checks finish
-before SQL migrations and atomic publication. Failure leaves every active application
-generation unchanged; a committed SQL migration can survive a later publication
-failure. Publication and removal are serialized across migrations, with registry
-locks held only for metadata access. See [SQL deployment](#sql-deployment-and-failures).
-An acknowledged deployment is active for subsequent requests; a lost connection
-can leave its outcome unknown, so inspect/redeploy before assuming failure.
+A valid deployment file is persisted before membership removals. Missing,
+invalid, or unreachable configuration preserves the last accepted membership.
+Only a valid `applications: {}` removes everything. Missing or invalid application
+manifests and incomplete, corrupt, incompatible, or conflicting releases preserve
+the affected active application. Other applications continue to reconcile.
+Pending versions retry on subsequent polls even if Git has not changed.
 
-Each request retains its selected application generation until completion. Old
-components are released once no active registry or request references them.
-Removal returns after route publication, without waiting for prior requests.
-`remove` of an unknown name fails. The execution limits in [Run](#run) apply
-globally across applications; there is no per-application fairness guarantee.
-Deleting local build outputs does not affect deployed component bytes.
+Each complete candidate is compiled and checked before migration/publication.
+Replacement is atomic per application; in-flight requests retain the previous
+generation. Prefix collisions are rejected, and there is no multi-application
+transaction or coordinated prefix swap. Migration history and compatibility
+rules remain those in [SQL deployment](#sql-deployment-and-failures): selecting
+an old version is not an automatic database rollback.
 
-The control transport uses one request and response per Unix connection. Each
-message is a four-byte big-endian byte length followed by UTF-8 JSON, capped at
-128 MiB including JSON encoding. The request's `command` is `deploy`, `remove`,
-`list`, `status`, or `stop`. Deploy includes `application: {name, path-prefix, kv, sql, migrations, handlers}`, where
-each handler contains `name`, `method`, `path`, and `component` (an array of byte
-values). Remove includes `name`. Responses use `result: ok`, `applications`
-(with `applications`), `status` (with `pid`, `listen`, `applications`, `storage`, and `sql`), or `error`
-(with `message`). Both application lists contain objects with `name`,
-`path-prefix`, `kv`, `sql` (a boolean capability flag), and `functions` fields. `functions` is sorted by name and contains
-objects with `name`, `method`, and application-relative `path` from the active
-routes, plus `metrics`. The metrics object contains `window_seconds` (300),
-`calls`, `latency_min_ms`, `latency_max_ms`, `latency_mean_ms`, and
-`response_codes` (an object mapping numeric HTTP status strings to counts).
-SQL status is a separate `sql` list of retained application database records,
-with `name`, current `migration` ID, optional `disk_bytes`, and per-operation
-statistics. Deployment `sql` is the manifest object; each migration record contains
-`id`, `name`, `apply` text, and optional `rollback` text.
-See [handler metrics](#handler-metrics) for measurement and lifecycle semantics.
-Component bytes are not included in these metadata responses. CLI list
-displays application names and prefixes; status also displays storage metadata.
-Four control requests may run concurrently; excess connections
-are closed. Client reads time out after 120 seconds; a timeout does not cancel a
-server-side deployment. The control socket is local administration, not a remote
-or multi-user authentication API.
+The state directory's `host.lock` holds an OS exclusive lock from before storage
+opening until final draining and KV sync. A second owner fails. A crash releases
+the lock; never delete the lock file to force ownership. Both hosting modes use
+the same lock. Each directory belongs to one config source; changing its
+repository, branch, or path requires a different directory.
 
-Deployments are held only in memory. Each new daemon process begins empty; redeploy
-the desired applications after a stop, crash, or restart. The state directory
-contains lifecycle files and logs, not persisted application configuration.
+Accepted configuration, removal decisions, active release records, and verified
+artifact bytes are persisted under `deployment/`. Successful releases can be
+restored without Git/registry access, subject to runtime and migration validation.
+A crash between database commit and release-record persistence can leave a newer
+schema with an older cached release; restoration then follows the existing
+migration-history checks and may require a compatible forward release. Cached
+configuration never authorizes an application omitted by a later accepted config.
+Git fetch state lives under `repositories/`; application data stays in `kv/` and
+`sql/`. Storage is local to one host; there is no replication or HA coordination.
 
-After upgrading from a version without path prefixes, restart the daemon so
-the CLI and control server use the same deployment and listing formats. Add an
-explicit `path-prefix` to each manifest before redeploying.
+Both commands stay in the foreground, write diagnostics to stderr and lifecycle
+messages to stdout, and drain on SIGINT/SIGTERM. An external process manager owns
+restarts. `Listening on ...` means the socket is bound; consult `/ready` for
+application readiness. The former daemon, deploy, apps, remove, and admin commands
+and private mutation socket have been removed.
 
-After upgrading from a version without function metadata, restart the daemon
-and redeploy applications before using the updated client. List and status
-responses require `functions`; an older daemon's response produces a metadata
-error rather than an empty function list.
+## Package and release format
 
-After upgrading from a version without handler metrics, restart the daemon and
-redeploy before using the updated admin client. Missing `metrics` is a metadata
-error, rather than being presented as a zero-call window.
+Production manifests add:
+
+```yaml
+publish:
+  registry: ghcr.io/example
+  version: "1.4.0"
+```
+
+The registry is an OCI hostname plus namespace, without a scheme, tag, or
+credentials. The version is a literal OCI tag. The schema specifies their exact
+shapes. Local run ignores these publishing fields and uses local components.
+
+After building at the intended source commit, CI runs:
+
+```sh
+wr package ./application.yaml --source-commit <FULL_COMMIT_SHA> --output ./release-output
+```
+
+Package validates the manifest, existing component files, and migration records;
+it does not invoke Cargo, inspect Git, compile Wasm, execute SQL, or upload.
+The caller supplies the full 40- or 64-digit hexadecimal source commit. The output
+must not already exist. A filesystem error can leave a partial output directory;
+only upload after a successful command. Package cannot prove that existing
+components were built from the supplied commit; CI owns a clean, successful build.
+
+Each function gets an OCI image layout in `functions/<name>/`; SQL-enabled apps
+also get `migrations/` containing a JSON array of the existing migration records,
+including full immutable history. `release/` contains the release record. Layouts
+have `oci-layout`, `index.json`, and content-addressed `blobs/sha256/`. Each image
+has one payload layer, an empty `{}` config, and an index tag equal to the version.
+Payload media types are `application/wasm`,
+`application/vnd.wr.migrations.v1+json`, and `application/vnd.wr.release.v1+json`.
+There are no timestamps in generated manifests; identical inputs produce identical
+digests. Static-file artifacts are not yet supported by the runtime.
+
+CI uploads each layout to `<registry>/<application>/<layout-path>:<version>`,
+copying manifests without rewriting them, and uploads `release` last. For example,
+`functions/hello` goes to `ghcr.io/example/greetings/functions/hello:1.4.0`.
+Use registry-side immutability and serialize publishers per application/version;
+a PR existence check alone cannot prevent publication races. Retry only identical
+content for an existing version. WR records observed version/digest bindings and
+rejects changed bindings when resolving them again; it does not continuously
+re-resolve tags for an already active unchanged release.
+
+The release JSON contains `format-version: 1`, `source-commit`, `version`,
+`application`, `functions`, and `migrations`. `application` is normalized runtime
+configuration: name, prefix, KV/SQL configuration, and named function HTTP routes;
+it excludes build dependencies and publish metadata. `functions` maps names to
+artifact descriptors; `migrations` is a descriptor or null. Each descriptor has
+`manifest` (OCI manifest SHA-256), `blob` (payload SHA-256), and `size` in bytes.
+These references use the deterministic repositories above. The runtime checks
+configuration equality against Git, exact function membership, release version,
+media types, sizes, and digests before activation. It downloads children by digest.
+
+A release is limited to 128 MiB of combined payloads; its descriptor is limited
+to 1 MiB. Cached deployment metadata is limited to 128 MiB. Git file reads are limited to 1 MiB, registrations to 1,000. Git operations
+and individual OCI payload fetches each have a 60-second deadline. Network failures
+are reported and retried on the next poll. Public registries' anonymous bearer-token
+exchange is supported; saved credentials and private registries are not.

@@ -118,7 +118,7 @@ Open `http://127.0.0.1:9000/demo/`. With a fresh example database the page shows
 `Hello from SQL!`, seeded by the existing migration. For a new application or
 changed dependency declarations, run `wr update examples` before building.
 Edit a template, rebuild, and restart the foreground server to see the change;
-with a daemon, rebuild and redeploy instead. There is no template hot reload.
+in production, rebuild and publish an authorized new version. There is no template hot reload.
 Invalid templates fail compilation without replacing the published components.
 
 ## Configure dependencies
@@ -268,18 +268,17 @@ curl http://127.0.0.1:9001/demo/counter
 
 The second request returns one more than the first. Stop gracefully and run
 again: the count continues. `wr clean examples` preserves the data; rebuild
-before serving again. Daemon deployments use separate storage. Changing the
+before serving again. Production uses its selected state directory. Changing the
 application name starts a different counter and retains the old keyspace.
 See [KV reference](reference.md#persistent-application-kv) before designing
 retries or backing up data.
 
 ## Observe KV storage
 
-Use `wr daemon status` to inspect retained keyspaces, operation
-counts/errors, elapsed-time totals and maxima, entry estimates, and shared
-database usage. The admin page shows shared database statistics and a keyspace
-file-size column. Foreground hosts emit the status metadata every 30 seconds.
-Successful graceful shutdown logs the explicit durable-sync duration.
+Start with `--admin-listen 127.0.0.1:9002` and open that address to inspect
+shared database statistics, retained storage owners, and keyspace sizes. The
+library's `Storage::inspect` API additionally exposes operation totals and entry
+estimates. Successful graceful shutdown logs the durable-sync result.
 
 For an alpha latency check, run the counter above on a representative filesystem
 and collect request durations (for example `curl -w '%{time_total}\n' -o /dev/null`).
@@ -337,86 +336,69 @@ and is separate from this timeout.
 
 ## Manage multiple applications
 
-On Unix, start one daemon and deploy each built application to it:
+Production uses `wr start` under your process manager. Keep a deployment file
+in a public repository:
 
-```sh
-wr daemon start --listen 127.0.0.1:9000
-wr deploy examples
-wr apps list
-wr daemon status
+```yaml
+applications:
+  greetings:
+    repo: https://example.com/team/greetings.git
+    branch: main
+    path: application.yaml
 ```
 
-Build another application in its own directory, give it a distinct `name` and
-a nonoverlapping `path-prefix` in its manifest, then run `wr deploy <DIRECTORY>`.
-Both applications use the same hosting address. Names identify applications; deploying
-the same name replaces its declared prefix, routes, and component bytes atomically.
-
-After changing an application's source, routes, or `path-prefix`:
+Run the foreground host:
 
 ```sh
-wr build examples
-wr deploy examples
-curl http://127.0.0.1:9000/demo/hello
+wr start --config-repo https://example.com/team/deploy.git \
+  --config-path config.yaml --config-branch main --state-dir /var/lib/wr \
+  --listen 127.0.0.1:9000 --admin-listen 127.0.0.1:9001
 ```
 
-If deployment fails, correct the reported component or route error and redeploy;
-the old application remains active. No daemon restart is needed. To remove the
-example application (whose name is `hello`) or shut down the entire host:
+Each application's name must match its registration and its `path-prefix` must
+not overlap another active application. Its manifest declares `publish.registry`
+and `publish.version` as shown in the [release reference](reference.md#package-and-release-format).
+Merging that manifest to the registered branch authorizes deployment; the host
+waits for its complete release. Remove a registration to withdraw its routes.
+Existing data is retained. The process manager owns restarts; WR restores accepted
+state and resumes polling.
+
+CI builds from the intended commit, then exports OCI layouts:
 
 ```sh
-wr remove hello
-wr daemon stop
+wr build ./greetings --release
+wr package ./greetings --source-commit <FULL_COMMIT_SHA> --output ./release-output
 ```
 
-Each new daemon process begins empty. Redeploy the desired applications after a
-restart. Repeating `wr daemon start` against a running daemon preserves its
-applications and reports its current address. `wr clean` affects local build
-outputs, not the running deployment.
-For separate development hosts use a private, short `--state-dir <DIRECTORY>`
-consistently on every command and a different hosting port. See the
-[daemon reference](reference.md#daemon-and-deployment) for state paths, logs,
-limits, and failure behavior.
-
-To manually verify generation lifetime, deploy the example, start a request to
-`/demo/misbehave/loop`, then redeploy or remove `hello` while it executes. The admitted
-request should still end with 504 at its deadline; new requests use the new
-routes (or return 404 after removal). To check shutdown draining, start the same
-loop and run `wr daemon stop` while it executes. Stop should wait for that
-execution to finish before reporting success. Repeat with a disconnected client
-to check that its execution still holds capacity until the deadline.
-
-## Inspect the daemon in a browser
-
-Start the daemon and deploy your built applications as above, then run:
+CI owns registry write credentials. Copy each function layout, the optional
+migration layout, and finally the release layout to the deterministic registry
+paths. For a `greetings` application with one `hello` function and SQL enabled,
+using ORAS:
 
 ```sh
-wr admin
+oras cp --from-oci-layout ./release-output/functions/hello:1.4.0 ghcr.io/example/greetings/functions/hello:1.4.0
+oras cp --from-oci-layout ./release-output/migrations:1.4.0 ghcr.io/example/greetings/migrations:1.4.0
+oras cp --from-oci-layout ./release-output/release:1.4.0 ghcr.io/example/greetings/release:1.4.0
 ```
 
-Open the printed `Admin UI listening on http://...` URL in a browser. The page
-shows the daemon PID, hosting address, and application names and path prefixes.
-Each application's Functions column lists deployed function names, HTTP methods,
-and paths relative to that application's prefix.
-It also shows minimum and maximum handler latency. Follow a function's name to
-see its call count, latency summary, and response code counts, then use
-Applications to return. These are recent measurements for the current
-deployment; see [handler metrics](reference.md#handler-metrics) for the window
-and reset rules.
-The page refreshes automatically after deploying, replacing, or removing an
-application. An empty daemon is shown as having no deployed applications.
+Use a CI step that stops on any failed copy, so the release is never published
+after a failed child upload. Copy every configured function. Preserve manifests
+and digests; use registry immutability and serialize conflicting publishers.
+[ORAS copy](https://github.com/oras-project/oras/blob/main/cmd/oras/root/cp.go)
+accepts OCI layouts directly. ORAS is a CI choice, not a WR runtime prerequisite.
 
-For a fixed UI port, use `wr admin --listen 127.0.0.1:9001`. To inspect an
-isolated daemon, pass its usual `--state-dir <DIRECTORY>` to the admin command.
-The UI works from any directory and needs no local application files.
+## Inspect the host in a browser
 
-If the page reports unavailable metadata, check the selected state directory
-and run `wr daemon status` with the same selection. Start the daemon if needed,
-and the page will recover on an automatic refresh. The UI may remain running
-while the daemon restarts.
-Ctrl-C in the admin terminal stops only the UI; the daemon and deployed
-applications keep running. See [Admin UI](reference.md#admin-ui) for the exact
-listener, response, and timeout behavior.
+Add `--admin-listen 127.0.0.1:9001` to `wr run` or `wr start`. The host prints
+the bound admin URL. Its overview shows applications, prefixes, handler links,
+KV/SQL state, and production desired/active versions and errors. Follow a handler
+for rolling call counts, latency, and response codes. Pages refresh automatically.
 
+The admin listener is separate from application routing, including root mounts.
+Only loopback binding is supported. `/status` returns reconciliation JSON,
+`/live` reports process liveness, and `/ready` reports application readiness.
+An upstream error can coexist with healthy cached applications. Ctrl-C stops the
+whole foreground host; there is no separate admin process.
 
 ## Use SQL and deploy schema changes
 
@@ -440,15 +422,14 @@ by the host. Rebuild old SQL 0.1.0 handlers for the cursor interface.
 ```sh
 wr update examples
 wr build examples
-wr deploy examples
+wr run examples --port 9000 --admin-listen 127.0.0.1:9001
+# In another terminal:
 curl http://127.0.0.1:9000/demo/sql/hello
-wr daemon status
 ```
 
-This assumes a daemon already listening on port 9000. `wr run examples` applies
-the same migrations to its separate foreground database. Build stays separate
-from run/deploy; deployment packages the current SQL files and existing component
-bytes. No SQLite CLI or SQL server installation is required.
+Local run applies migrations to its application data directory. Production
+applies the migration records in its authorized OCI release. Build stays
+separate from serving; packaging reads current SQL files and existing components. No SQLite CLI or SQL server installation is required.
 
 For the next schema change, add a new numbered apply file rather than editing
 an applied file. Use additive changes while older handlers may still execute.

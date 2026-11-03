@@ -1,4 +1,4 @@
-use std::{future::Future, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{future::Future, net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use rocket::{
@@ -8,43 +8,77 @@ use rocket::{
     response::content::{RawCss, RawHtml},
 };
 
-use crate::control::{
-    client,
-    protocol::{Reply, Request},
-};
+use crate::{deployment::SharedStatus, hosting::applications::Applications};
+use std::sync::Arc;
 
 mod render;
-
 const STYLESHEET: &str = include_str!("style.css");
 const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
+struct Source {
+    applications: Arc<Applications>,
+    status: SharedStatus,
+    listen: SocketAddr,
+}
+
 #[rocket::get("/")]
-async fn index(socket: &State<PathBuf>) -> (Status, RawHtml<String>) {
-    match metadata(socket).await {
-        Ok(Reply::Status {
-            pid,
-            listen,
-            applications,
-            storage,
-            sql,
-        }) => (
-            Status::Ok,
-            RawHtml(render::overview(pid, listen, &applications, &storage, &sql)),
+async fn index(source: &State<Source>) -> (Status, RawHtml<String>) {
+    let metadata = tokio::time::timeout(METADATA_TIMEOUT, async {
+        tokio::try_join!(
+            source.applications.storage_info(),
+            source.applications.sql_info()
+        )
+    })
+    .await;
+    match metadata {
+        Ok(Ok((storage, sql))) => {
+            let status = source.status.read().expect("deployment status").clone();
+            (
+                Status::Ok,
+                RawHtml(render::overview(
+                    std::process::id(),
+                    source.listen,
+                    &source.applications.list(),
+                    &storage,
+                    &sql,
+                    &status,
+                )),
+            )
+        }
+        result => (
+            Status::ServiceUnavailable,
+            RawHtml(render::unavailable(&format!("{result:?}"))),
         ),
-        result => metadata_error(result),
+    }
+}
+
+#[rocket::get("/status")]
+async fn status(source: &State<Source>) -> rocket::response::content::RawJson<String> {
+    let status = source.status.read().expect("deployment status").clone();
+    rocket::response::content::RawJson(serde_json::to_string(&status).expect("serializable status"))
+}
+
+#[rocket::get("/live")]
+fn live() -> &'static str {
+    "live"
+}
+
+#[rocket::get("/ready")]
+fn ready(source: &State<Source>) -> (Status, &'static str) {
+    if source.status.read().expect("deployment status").ready {
+        (Status::Ok, "ready")
+    } else {
+        (Status::ServiceUnavailable, "waiting for applications")
     }
 }
 
 #[rocket::get("/applications/<application>/handlers/<handler>")]
-async fn handler_metrics(
-    socket: &State<PathBuf>,
+fn handler_metrics(
+    source: &State<Source>,
     application: &str,
     handler: &str,
 ) -> (Status, RawHtml<String>) {
-    let applications = match metadata(socket).await {
-        Ok(Reply::Status { applications, .. }) => applications,
-        result => return metadata_error(result),
-    };
+    let applications = source.applications.list();
     let Some((app, function)) = applications
         .iter()
         .find(|app| app.name == application)
@@ -60,27 +94,6 @@ async fn handler_metrics(
     (Status::Ok, RawHtml(render::handler(app, function)))
 }
 
-async fn metadata(socket: &State<PathBuf>) -> Result<Reply> {
-    tokio::time::timeout(
-        METADATA_TIMEOUT,
-        client::request_async(socket, Request::Status),
-    )
-    .await
-    .context("daemon metadata request timed out after five seconds")
-    .and_then(|result| result)
-}
-
-fn metadata_error(result: Result<Reply>) -> (Status, RawHtml<String>) {
-    let message = match result {
-        Err(error) => format!("{error:#}"),
-        Ok(_) => "Unexpected response to daemon status request".to_owned(),
-    };
-    (
-        Status::ServiceUnavailable,
-        RawHtml(render::unavailable(&message)),
-    )
-}
-
 #[rocket::get("/style.css")]
 fn stylesheet() -> RawCss<&'static str> {
     RawCss(STYLESHEET)
@@ -88,7 +101,9 @@ fn stylesheet() -> RawCss<&'static str> {
 
 pub(crate) async fn serve(
     listen: SocketAddr,
-    socket: PathBuf,
+    applications: Arc<Applications>,
+    deployment_status: SharedStatus,
+    hosting_address: SocketAddr,
     shutdown: impl Future<Output = ()>,
     on_ready: impl FnOnce(SocketAddr) + Send + Sync + 'static,
 ) -> Result<()> {
@@ -108,8 +123,15 @@ pub(crate) async fn serve(
         },
         ..rocket::Config::default()
     })
-    .manage(socket)
-    .mount("/", rocket::routes![index, handler_metrics, stylesheet])
+    .manage(Source {
+        applications,
+        status: deployment_status,
+        listen: hosting_address,
+    })
+    .mount(
+        "/",
+        rocket::routes![index, handler_metrics, stylesheet, status, live, ready],
+    )
     .attach(AdHoc::on_response(
         "Admin response headers",
         |request, response| {

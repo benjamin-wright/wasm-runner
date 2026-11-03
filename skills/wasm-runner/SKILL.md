@@ -20,7 +20,7 @@ For routing, dependencies, application capabilities, and troubleshooting, consul
 
 Use a dedicated application directory containing `application.yaml` and
 `functions/`. Application filesystem commands take this directory, not the manifest
-filename; daemon commands manage the shared host. Create these application files directly; `wr` manages the Cargo
+filename for authoring commands; run and package also accept a manifest path. Create these application files directly; `wr` manages the Cargo
 workspace. If an existing handwritten `Cargo.toml` blocks setup, preserve it
 and use a separate application directory.
 
@@ -99,42 +99,33 @@ application path:
 wr setup my-app --dry-run
 wr update my-app
 wr build my-app
-wr daemon start --listen 127.0.0.1:9000
-wr deploy my-app
-wr daemon status
+wr run my-app --port 9000 --admin-listen 127.0.0.1:9001
 ```
 
-The optional preview displays the proposed workspace without writing or compiling.
-For a new application, `wr update` creates its dependency lockfile without building.
-`wr build` performs setup automatically and uses the locked versions. Expect a
-`Built` line for `.wr/components/greet.wasm`. Wait for `Listening on http://127.0.0.1:9000`
-and `Deployed my-app` before sending requests. Deploy does not build missing or changed sources.
-The daemon workflow requires Unix. For foreground serving, `wr run my-app`
-remains available and stops with Ctrl-C.
-
-After readiness, use another terminal to verify the endpoint:
+Preview displays proposed files; update creates or refreshes the dependency
+lockfile. Build performs setup automatically and compiles locked components.
+Run uses existing outputs and stops with Ctrl-C. In another terminal:
 
 ```sh
 curl -i http://127.0.0.1:9000/my-app/hello
 ```
 
-Expect status 200 and `Hello, world!`. Stop with `wr daemon stop`.
-After source or manifest changes, rebuild and redeploy the application.
-Use `wr apps list` to inspect deployed names and `wr remove my-app` to remove one.
-Use `wr admin` for a read-only browser overview of applications and their deployed
-functions, HTTP methods, relative route paths, and rolling handler metrics.
-Open its printed local URL and follow a function name for call counts, latency,
-and response codes. Pages refresh automatically; Ctrl-C stops the UI while leaving the daemon
-running. Use the same `--state-dir` selection as your other daemon commands.
-Every manifest requires `path-prefix`: use `/my-app` to mount this application
-or `/` for sole-application root hosting. Equal or nested prefixes conflict;
-different applications may use identical relative function routes. Conflicting
-deployments fail atomically. Prefixes are applied by both run and deploy;
-handlers receive application-relative paths, and there is no CLI prefix override.
-Daemon deployments are in memory, so redeploy after every daemon restart.
-Use a consistent `--state-dir <DIRECTORY>` when targeting an isolated daemon.
-There is no file watcher or automatic redeployment. The default listener is `127.0.0.1:8080`;
-`--listen` requires a numeric IP and port, not a hostname.
+Expect status 200 and `Hello, world!`. After local changes, rebuild and restart.
+The optional admin listener shows live metadata and rolling handler metrics.
+Every application needs an explicit `path-prefix`; equal or nested prefixes
+conflict in a multi-application host.
+
+Production uses foreground `wr start --config-repo <PUBLIC_GIT_URL>
+--config-branch main --config-path config.yaml --state-dir <DIRECTORY>` under a
+process manager. The deployment file registers application repositories,
+branches, and manifest paths. Changes to registered application manifests
+authorize deployment. Each production manifest needs `publish.registry` and
+`publish.version`; CI runs `wr package <PATH> --source-commit <SHA> --output <NEW_DIRECTORY>`
+and uploads the resulting OCI layouts, release last. WR only reads public Git
+and OCI endpoints, verifies digest-pinned releases, and retains the previous
+application on failure. Removal preserves data. State directories are
+exclusively locked; verified releases support recovery without upstream access.
+See the project's production and packaging reference for the release contract.
 
 Builds are locked by default: a missing or outdated application lockfile is an
 error. Source-only edits need only a rebuild. To deliberately update dependencies

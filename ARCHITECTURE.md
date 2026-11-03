@@ -16,13 +16,14 @@ guest workspaces.
 | --- | --- |
 | [main](src/main.rs) | Report errors and return the process exit status |
 | [CLI](src/cli/mod.rs) | Parse arguments and dispatch commands |
-| [Application commands](src/cli/application), [daemon commands](src/cli/daemon.rs), [application management](src/cli/apps.rs) | Command orchestration and presentation |
-| [Identifiers](src/identifier.rs) | Shared application/function name predicate for source discovery, control validation, and storage capabilities |
-| [Project](src/project) | Manifest validation, source discovery, workspace generation, Cargo invocation, and packaging existing component bytes |
-| [Daemon](src/daemon/mod.rs) | Compose the application registry and listeners; coordinate readiness and shutdown |
-| [Process lifecycle](src/daemon/process.rs) | Background launch, singleton lock, private state paths, readiness handshake, and cleanup |
-| [Control](src/control) | Shared wire protocol, client transport, and management request handlers |
-| [Admin command](src/cli/admin.rs), [admin UI](src/admin) | Select a daemon and own a separate local HTTP listener, live metadata queries, and HTML presentation |
+| [Application commands](src/cli/application), [start command](src/cli/start.rs) | CLI orchestration and signal handling |
+| [Identifiers](src/identifier.rs) | Shared application/function names and storage identities |
+| [Project](src/project) | Local manifest validation, source discovery, generation, builds, and local packaging inputs |
+| [Host](src/hosting/host.rs), [state directory](src/hosting/state.rs) | Compose listeners, hold the process lock, drain work, and sync storage |
+| [Reconciler](src/deployment/reconcile.rs) | Membership, authorized versions, retry decisions, and recovery |
+| [Repository adapter](src/deployment/repository.rs), [registry adapter](src/deployment/registry.rs) | Read public Git files and OCI artifacts through small application-facing interfaces |
+| [Release](src/deployment/release.rs), [package](src/deployment/package.rs), [cache](src/deployment/cache.rs) | Release validation, OCI layout export, and durable cached bytes/state |
+| [Admin UI](src/admin) | Direct read-only host inspection, health responses, and HTML presentation |
 | [Applications](src/hosting/applications.rs) | Prepare, publish, list, and remove application generations |
 | [Routing](src/hosting/routing.rs) | Construct and validate each application’s prepared Rocket routes |
 | [Hosting server](src/hosting/server.rs) | Translate HTTP, bound execution admission, and drain shutdown |
@@ -32,11 +33,17 @@ guest workspaces.
 | [SQL persistence](src/persistence/sql) | Own application databases, restrict SQL execution, apply migration history, and inspect |
 | [Migration packaging](src/project/migrations.rs) | Discover named SQL files and produce validated deployment records |
 
-Project tooling knows files and Cargo; deployment transfers identity, the declared path prefix, routes,
-and bytes without source paths. Control handlers call application operations;
-application hosting has no dependency on control transport or CLI types. The
-runtime remains independent of manifests and HTTP transport. These are concrete
-modules rather than provider traits or separate crates.
+Project tooling knows files and Cargo. Both local packaging and release loading
+produce the [hosting deployment value](src/hosting/deployment.rs): identity,
+prefix, capability configuration, migration records, and component bytes. The
+runtime remains independent of manifests, source locations, Git, and OCI.
+
+The [deployment interfaces](src/deployment/ports.rs) expose repository-file
+observations, release/artifact reads, and application installation/removal. They
+are narrow boundaries for reconciliation logic, not general transport providers.
+The production implementations use Git, the OCI client, and the existing
+application registry. Tests substitute simple observations and outcomes at these
+interfaces; there is no fake Git server or registry protocol implementation.
 
 ### Module grouping
 
@@ -81,24 +88,22 @@ capabilities supplied to it; it does not own storage-path selection.
 
 ```mermaid
 flowchart TD
-    CLI[CLI command] --> Project[Load manifest and project inputs]
-    Project --> Generate[Setup/build/update: generate guest workspace]
-    Generate --> Cargo[Build/update: invoke Cargo]
-    Project --> Package[Deploy: read built component bytes]
-    Package --> Control[Private control socket]
-    Control --> Prepare[Prepare application runtime and routes]
-    Prepare --> Validate[Validate application routes and prefix ownership]
-    Validate --> Publish[Atomically publish application]
-    HTTP[Hosting listener] --> Snapshot[Select prefix and retain application]
-    Snapshot --> Dispatch[Rocket routing and isolated execution]
-    Daemon[Daemon lifecycle] --> HTTP
-    Daemon --> Control
+    Local[Local manifest and built files] --> Input[Hosting deployment]
+    Git[Public Git files] --> Reconcile[Reconciler]
+    OCI[Complete OCI release] --> Reconcile
+    Cache[Verified cache and accepted state] <--> Reconcile
+    Reconcile --> Input
+    Input --> Prepare[Compile components and validate routes]
+    Prepare --> Migrate[Validate ownership and apply migrations]
+    Migrate --> Publish[Replace one application generation]
+    HTTP[Hosting listener] --> Publish
 ```
 
-Setup, build, update, run, and deploy load the manifest once within their command
-workflows. Clean only needs the directory, allowing recovery from invalid or
-missing inputs. Run and deploy read existing components without generating
-files or invoking Cargo. Native compilation belongs to runtime preparation.
+Run and package read existing components without invoking Cargo. Package writes
+OCI layouts for an external CI publisher. The release record is published last;
+its child digests bind the complete artifact set. Production reads only manifests
+from Git, never checks out application code or invokes application builds. The
+reconciler rechecks authorization after downloads and before installation.
 
 YAML parsing and merge resolution use `yaml_serde`. The resolved document is
 validated by `jsonschema` against the embedded schema and deserialized into
@@ -107,7 +112,7 @@ dispatcher ignition. Source existence needs filesystem checks. Diagnostics use
 basic operation context through `anyhow`; there is no custom source-location
 tracking. See [validation stages](docs/reference.md#validation-stages).
 
-## Live applications and daemon lifecycle
+## Live applications and host lifecycle
 
 The application registry holds a sorted map of names to immutable application
 generations. Each generation owns its declared path prefix, one runtime, and an
@@ -146,31 +151,19 @@ reference drops. Per-generation runtimes avoid changing the public runtime API,
 at the cost of an engine and ticker per deployed application generation. The
 public `server::serve` embedding API remains rooted at `/`; the foreground CLI
 uses the same registry and hosting path with the manifest's prefix.
-Its CLI entry point delegates to an asynchronous serving function; signal
-registration and periodic storage diagnostics have separate helpers. Signal
-listeners are registered before preparation, and diagnostics are polled alongside
-shutdown so inspection cannot delay signal handling. Storage sync follows draining.
-
-The daemon owns both listeners and shuts down the other if either fails. Its
-process-held file lock covers stale-socket cleanup through final shutdown; it
-never trusts a recorded PID or unlinks the lock file. The start command first
-queries live status and reports an existing instance without spawning a child.
-For a new instance, background start waits
-for a readiness line from the child after both binds. The child runs in its own
-process group with terminal input disconnected and diagnostics appended to its
-log. Unix control transport is length-framed JSON with bounded message sizes,
-concurrency, and read/write deadlines. Deployment state is deliberately volatile.
+The shared foreground host owns the state-directory lock, storage owners,
+application listener, optional admin listener, and reconciliation task. Signals
+close admission, stop further reconciliation, drain work, and sync KV before
+the lock is released. Lock ownership is kernel-backed; PID files and stale-lock
+removal are unnecessary. An external process manager owns restart policy.
 
 ## Local admin UI
 
-The foreground `wr admin` client owns a loopback Rocket listener independently
-of the daemon. Each overview request uses the existing status protocol over
-the selected Unix socket; the daemon remains the source of metadata and does
-not render HTML. Application hosting and its root mounts are unaffected.
-Application metadata includes function names, methods, and relative paths read
-from each active Rocket dispatcher. This keeps inspection tied to the published
-generation without retaining a second copy of deployment metadata or component
-bytes. Functions are sorted by name before being returned over control transport.
+The host's optional loopback Rocket listener reads the application registry and
+reconciliation status directly. It has no mutation API or separate process.
+Application metadata comes from active dispatchers and generation-owned metrics;
+storage inspection runs outside registry locks. HTML rendering stays in the
+private renderer and assets are embedded.
 
 Route preparation also creates a shared metrics window per handler name. The
 registered handler records completed dispatch latency and the translated HTTP
@@ -183,16 +176,11 @@ and inspection avoids a timer task and keeps idle views current. Generation
 ownership naturally isolates replacement metrics from still-running old calls.
 The runtime has no knowledge of HTTP metrics or admin presentation.
 
-The control client provides synchronous transport for existing CLI commands
-and asynchronous transport for HTTP handlers, sharing wire encoding and reply
-validation. The UI bounds the complete async exchange with a deadline;
-cancellation drops the socket instead of leaving a blocked worker behind.
-There is no metadata cache or server-side polling task. HTML responses use an
-HTTP `Refresh` header to reload every five seconds after loading, including error
-pages. Its explicit URL comes from the request URI, which excludes browser
-fragments and prevents an in-page navigation from replacing the metadata fetch.
-The CLI owns process signals and
-readiness reporting; the UI server owns rendering and HTTP responses.
+Storage inspection has a five-second deadline. HTML refreshes every five seconds
+with an explicit request URI, including errors, so fragment navigation cannot
+substitute for a new metadata request. Status reports accepted configuration,
+desired and active versions, observed commits, and failures separately from the
+liveness and readiness endpoints.
 
 Rocket's HTML responder wraps a small embedded page shell and directly rendered,
 escaped status and table content. The private [renderer](src/admin/render.rs)
@@ -348,7 +336,7 @@ from initializing over unrecognized or damaged storage.
 
 ```mermaid
 flowchart TD
-    Host[Daemon or foreground host] --> Storage[Storage owner]
+    Host[Foreground host] --> Storage[Storage owner]
     Storage --> DB[One Fjall database]
     Storage --> A[Application A capability]
     Storage --> B[Application B capability]
@@ -378,7 +366,7 @@ or runtime types; the runtime translates values and errors at the boundary.
 
 ### Preparation and execution
 
-Manifest parsing and control deserialization accept only the boolean capability
+Manifest and release parsing accept only the boolean capability
 flag, defaulting omission to disabled. During blocking preparation, the
 application registry obtains the handle before compiling/linking components and
 preparing routes. It then rechecks shutdown and prefix ownership under the
@@ -402,9 +390,9 @@ mutation remains accepted when the post-call deadline check traps.
 
 Default Fjall journal persistence flushes to OS buffers. Per-call durable sync
 is not requested; normal engine maintenance and backpressure remain enabled.
-Daemon shutdown drains both control/preparation work and guest execution before
+Host shutdown drains both reconciliation/preparation work and guest execution before
 explicit `persist(SyncAll)`, reporting the outcome before releasing handles and
-the daemon singleton lock. Foreground and the storage-enabled embedding server
+the host state-directory lock. Foreground and the storage-enabled embedding server
 use the same explicit boundary. Direct storage/runtime embedders own draining
 and sync themselves.
 
@@ -414,13 +402,12 @@ engine statistics outside it. Keyspace disk usage is read through the transactio
 handle's `inner()` accessor; all mutations still use transactional operations.
 Estimated entries, whole-database disk bytes, and journal counts are also available.
 No entry scan or mirror map is maintained to invent missing measurements.
-Status/admin use blocking jobs for inspection. Foreground diagnostics emit
-periodically and are polled separately from shutdown signals, so a slow sample
-does not delay closing admission. Sync results and shared storage failures are
+Admin requests use blocking jobs for inspection, independently of shutdown
+signals, so a slow sample does not delay closing admission. Sync results and shared storage failures are
 logged without keys or values.
 
 Public storage tests exercise real temporary databases. Independently named CLI
-tests cover building, HTTP dispatch, deployment/admin, runtime KV, daemon KV, and
+tests cover building, HTTP dispatch, local hosting/admin, runtime KV, and
 foreground hosting. Hosting tests compile their current components once per test
 process and share only immutable bytes; each workflow owns its mutable fixtures.
 Build verification and frozen HTTP-only compatibility use separate workspaces so
@@ -495,13 +482,13 @@ Both forward and rollback SQL are restricted from history, external databases,
 engine configuration, and transaction control.
 
 Project packaging reads the fixed migration directory into bounded records.
-Those records travel in the existing control message alongside component bytes,
-without an archive or daemon access to source paths. Component compilation and
+Local loading and OCI release loading produce the same migration records
+alongside component bytes, without production access to source paths. Component compilation and
 Rocket route preparation happen first. Once the publication mutex is held, the
 registry validates prefix ownership, runs migrations on the blocking pool, and
 publishes the generation. The blocking migration job retains the mutex even if
 its awaiting future is cancelled. Registry read/write locks are never held over
-SQL I/O; other HTTP applications remain available. This serializes final control
+SQL I/O; other HTTP applications remain available. This serializes final application
 mutations across applications as a deliberate first-version simplicity tradeoff.
 
 A database commit and registry publication are not one atomic transaction.

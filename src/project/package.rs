@@ -7,11 +7,16 @@ use super::manifest::ApplicationDefinition;
 
 pub(crate) fn deployment(
     directory: &std::path::Path,
-) -> Result<crate::control::protocol::Deployment> {
+) -> Result<crate::hosting::deployment::Deployment> {
     let application = super::manifest::load(directory)?;
     let handlers = load_handlers(&application)?;
-    let migrations = super::migrations::load(directory, application.sql)?;
-    Ok(crate::control::protocol::Deployment {
+    let root = if directory.is_file() {
+        directory.parent().expect("manifest parent")
+    } else {
+        directory
+    };
+    let migrations = super::migrations::load(root, application.sql)?;
+    Ok(crate::hosting::deployment::Deployment {
         name: application.name,
         path_prefix: application.path_prefix,
         kv: application.kv,

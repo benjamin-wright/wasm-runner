@@ -2,12 +2,12 @@
 
 This guide takes the checked-in example from Rust source to WebAssembly
 components and a running HTTP server. You need a local checkout of this repository
-and a shell. Run every command below from the **repository root**. Build and deployment are separate steps; redeploy after rebuilding. The daemon workflow requires Unix.
+and a shell. Run every command below from the **repository root**. Build and serving are separate steps; restart local serving after rebuilding.
 
 ## Prerequisites and installation
 
 Install [rustup](https://rust-lang.github.io/rustup/installation/index.html), and
-ensure `rustup` and `cargo` are on your `PATH`. You also need `make`. From this
+ensure `rustup` and `cargo` are on your `PATH`. You also need `make`. Production Git reads require Git on `PATH`; Git is not needed by `wr run`. From this
 checkout, run:
 
 ```sh
@@ -20,8 +20,7 @@ wr --help
 pinned Rust toolchain, Clippy, rustfmt, and `wasm32-wasip2` target. `make install`
 builds a release binary using the repository's [Cargo.lock](../Cargo.lock) and
 installs `wr` into Cargo's binary directory (normally `~/.cargo/bin`). Ensure
-that directory is on your `PATH`. Help should list `setup`, `build`, `update`, `clean`, `run`,
-`daemon`, `deploy`, `apps`, and `remove`.
+that directory is on your `PATH`. Help should list `setup`, `build`, `update`, `clean`, `run`, `package`, and `start`.
 
 Repeat `make install` to refresh the installed command after changes. Use
 `cargo uninstall wasm-runner` to remove it. Repository verification and the
@@ -91,48 +90,24 @@ lockfile changes and rebuild. See [dependency updates](reference.md#update).
 ## Serve the application
 
 ```sh
-wr daemon start --listen 127.0.0.1:9000
-wr deploy examples
-wr daemon status
+wr run examples --port 9000 --admin-listen 127.0.0.1:9001
 ```
 
-Start returns after both listeners are bound. Deploy returns after all routes and
-components are prepared and active. The output includes:
-
-```text
-Daemon started
-Listening on http://127.0.0.1:9000
-...
-Deployed hello
-```
-
-Then call the hosting listener:
+Wait for `Listening on http://127.0.0.1:9000`, then use another terminal:
 
 ```sh
-curl http://127.0.0.1:9000/demo/hello
-curl -H 'Content-Type: application/json' -d '{"hello":"world"}' http://127.0.0.1:9000/demo/echo
-curl 'http://127.0.0.1:9000/demo/users/42/orders?status=open&tag=a&tag=b'
+curl -i http://127.0.0.1:9000/demo/hello
 ```
 
-Expect `Hello, world!`, the echoed JSON object, and a JSON request description
-with `user_id` equal to `42` and the two `tag` values grouped together.
-Open `http://127.0.0.1:9000/demo/` in a browser for the SQL-backed greeting page.
-It renders HTML inside the Wasm component using Askama; see the
-[templating recipe](guides.md#render-html-with-askama) to change its layout.
-Run `wr daemon stop` to stop accepting work and drain admitted executions.
-Starting again begins with no applications; run `wr deploy examples` again.
-For foreground serving, use `wr run examples --listen 127.0.0.1:9000` instead
-of the daemon commands and stop it with Ctrl-C.
-If components are missing, run the build step first. See the
-[server reference](reference.md#run) for limits and errors.
+Expect status 200 and `Hello, world!`. Open <http://127.0.0.1:9001> for live
+application, storage, and handler information. Stop the process with Ctrl-C.
+Local storage remains beneath `examples/.wr-data/` across restarts.
 
 ## Make a small change
 
-Change the greeting bytes in [greet.rs](../examples/functions/greet.rs), then run
-`wr build examples` again. The component is rebuilt and published at the same
-path. With the daemon running, run `wr deploy examples`, then call `/demo/hello`
-to see the new response. A failed deployment leaves the previous application active.
-See [managing multiple applications](guides.md#manage-multiple-applications).
+Edit a handler, stop local serving, run `wr build examples`, and start the same
+`wr run` command again. Build failures leave previously built components intact.
+There is no local file watcher or automatic build on run.
 
-Continue with [Common tasks](guides.md) to add a function, configure dependencies,
-prepare VS Code, make a locked build, or clean generated files.
+For automatic production updates from public Git repositories and OCI registries,
+follow [Manage multiple applications](guides.md#manage-multiple-applications).

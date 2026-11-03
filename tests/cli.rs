@@ -294,171 +294,6 @@ fn runtime_accepts_pre_sql_components() {
 
 #[cfg(unix)]
 #[test]
-fn daemon_kv_preserves_data_and_reports_live_metrics() {
-    let component = compiled_component("kv-test");
-    let source = "name: first\npath-prefix: /one\nkv: true\nfunctions:\n  counter:\n    http:\n      method: GET\n      path: /<path..>\n";
-    let first = ManifestFixture::new(source);
-    let second = ManifestFixture::new(&source.replace("first", "second").replace("/one", "/two"));
-    for fixture in [&first, &second] {
-        fixture.write_component("counter", component);
-    }
-    let daemon = DaemonFixture::new();
-    let mut address = daemon.start();
-    assert!(!daemon.directory.join("d/kv").exists());
-    {
-        use std::io::{Read, Write};
-        let mut stream =
-            std::os::unix::net::UnixStream::connect(daemon.directory.join("d/control.sock"))
-                .unwrap();
-        let body = br#"{"command":"deploy","application":{"name":"invalid","path-prefix":"/invalid","kv":"true","handlers":[]}}"#;
-        stream
-            .write_all(&(body.len() as u32).to_be_bytes())
-            .unwrap();
-        stream.write_all(body).unwrap();
-        let mut size = [0; 4];
-        stream.read_exact(&mut size).unwrap();
-        let mut reply = vec![0; u32::from_be_bytes(size) as usize];
-        stream.read_exact(&mut reply).unwrap();
-        let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
-        assert_eq!(reply["result"], "error");
-    }
-    fs::write(&first.path, source.replace("kv: true", "kv: false")).unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
-    assert!(!daemon.directory.join("d/kv").exists());
-    let locked = wasm_runner::persistence::Storage::new(
-        fs::canonicalize(daemon.directory.join("d"))
-            .unwrap()
-            .join("kv"),
-    );
-    locked.application("first").unwrap();
-    fs::write(&first.path, source).unwrap();
-    assert!(
-        !daemon
-            .call(&["deploy", first.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
-    locked.sync().unwrap();
-    drop(locked);
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    daemon.success(&["deploy", second.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/one/").ends_with("1"));
-    assert!(http(&address, "GET", "/two/").ends_with("1"));
-    assert!(http(&address, "GET", "/one/").ends_with("2"));
-    fs::write(&first.path, source.replace("/one", "/moved")).unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/moved/").ends_with("3"));
-    daemon.success(&["remove", "first"]);
-    let status = daemon.success(&["daemon", "status"]);
-    assert!(status.contains("\"name\":\"first\""));
-    assert!(status.contains("estimated_entries"));
-    assert!(status.contains("max_micros"));
-    let admin = AdminFixture::start(&daemon.directory.join("d"));
-    let page = admin.page();
-    let daemon_section = page
-        .split("id=\"daemon\"")
-        .nth(1)
-        .unwrap()
-        .split("</section>")
-        .next()
-        .unwrap();
-    assert!(daemon_section.contains("Database disk bytes"));
-    assert!(daemon_section.contains("Journal fragments"));
-    assert!(!daemon_section.contains("Keyspace file bytes"));
-    assert!(page.contains("<th scope=\"col\">Keyspace file bytes</th>"));
-    assert!(!page.contains("Estimated entries"));
-    assert!(!page.contains("KV metrics"));
-    assert!(!page.contains(">increment</th>"));
-    assert!(!page.contains("Maximum μs"));
-    assert!(!page.contains("Entry counts are estimates"));
-    assert!(!page.contains("excludes shared journals"));
-    assert_eq!(page.matches("data-application=\"first\"").count(), 1);
-    let first_metrics = admin_application(&page, "first");
-    assert!(first_metrics.contains(">Disabled</span>"));
-    assert!(first_metrics.contains("<td class=\"keyspace-bytes\">0</td>"));
-    assert!(!first_metrics.contains("/moved"));
-    let second_metrics = admin_application(&page, "second");
-    assert!(second_metrics.contains(">Enabled</span>"));
-    assert!(second_metrics.contains("<td class=\"keyspace-bytes\">0</td>"));
-    assert!(second_metrics.contains("/two</code>"));
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/moved/").ends_with("4"));
-    assert!(http(&address, "GET", "/moved/trap").starts_with("HTTP/1.1 500"));
-    assert!(http(&address, "GET", "/moved/timeout").starts_with("HTTP/1.1 504"));
-    let detail = http(
-        &admin.address,
-        "GET",
-        "/applications/first/handlers/counter",
-    );
-    assert!(detail.contains("<dt>Completed calls</dt><dd>3</dd>"));
-    for code in [200, 500, 504] {
-        assert!(detail.contains(&format!("<th scope=\"row\">{code}</th><td>1</td>")));
-    }
-    let page = admin.page();
-    assert_eq!(page.matches("data-application=\"first\"").count(), 1);
-    let first_metrics = admin_application(&page, "first");
-    assert!(first_metrics.contains(">Enabled</span>"));
-    assert!(first_metrics.contains("/moved</code>"));
-    assert!(first_metrics.contains("<td class=\"keyspace-bytes\">0</td>"));
-    fs::write(
-        &first.path,
-        source
-            .replace("/one", "/moved")
-            .replace("kv: true", "kv: false"),
-    )
-    .unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/moved/disabled").ends_with("disabled"));
-    let page = admin.page();
-    assert!(admin_application(&page, "first").contains(">Enabled</span>"));
-    assert!(admin_application(&page, "first").contains("<td class=\"keyspace-bytes\">—</td>"));
-    fs::write(&first.path, source.replace("/one", "/moved")).unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/moved/").ends_with("5"));
-    daemon.success(&["daemon", "stop"]);
-    let log = fs::read_to_string(daemon.directory.join("d/daemon.log")).unwrap();
-    assert!(log.contains("shared application database: durable sync succeeded in"));
-    address = daemon.start();
-    assert!(daemon.success(&["apps", "list"]).is_empty());
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/moved/").ends_with("6"));
-    let status = daemon.success(&["daemon", "status"]);
-    assert!(status.contains("\"name\":\"second\""));
-    let page = admin.page();
-    assert!(admin_application(&page, "second").contains(">Disabled</span>"));
-    assert!(!page.contains("Durable sync:"));
-    assert!(!page.contains("Not yet requested"));
-    // A process crash preserves OS-buffered accepted mutations on a healthy OS.
-    let pid = status
-        .split("PID ")
-        .nth(1)
-        .unwrap()
-        .split(')')
-        .next()
-        .unwrap();
-    assert!(
-        Command::new("kill")
-            .args(["-KILL", pid])
-            .status()
-            .unwrap()
-            .success()
-    );
-    for _ in 0..100 {
-        if !daemon.call(&["daemon", "status"]).status.success() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    address = daemon.start();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/moved/").ends_with("7"));
-    daemon.success(&["daemon", "stop"]);
-}
-
-#[cfg(unix)]
-#[test]
 fn foreground_kv_survives_restart_and_clean() {
     let application = ManifestFixture::new(
         "name: first\npath-prefix: /moved\nkv: true\nfunctions:\n  counter:\n    http: {method: GET, path: '/<path..>'}\n",
@@ -478,15 +313,6 @@ fn foreground_kv_survives_restart_and_clean() {
 }
 
 #[cfg(unix)]
-fn admin_application<'a>(page: &'a str, name: &str) -> &'a str {
-    page.split_once(&format!("data-application=\"{name}\""))
-        .expect("application displayed")
-        .1
-        .split("</tbody>")
-        .next()
-        .unwrap()
-}
-
 #[test]
 fn runtime_sql_checks_capabilities_and_preserves_committed_writes() {
     use std::time::Duration;
@@ -653,125 +479,6 @@ fn migration_packaging_rejects_invalid_files_without_opening_storage() {
         );
         assert!(!fixture.directory.join(".wr-data").exists());
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn sql_deployment_validates_before_migrating_and_preserves_history() {
-    let source = "name: first\npath-prefix: /one\nsql: {enabled: true}\nfunctions:\n  counter:\n    http: {method: GET, path: '/<path..>'}\n";
-    let first = ManifestFixture::new(source);
-    first.write_component("counter", compiled_component("sql-test"));
-    write_sql_migrations(&first);
-    let daemon = DaemonFixture::new();
-    let mut address = daemon.start();
-    fs::write(
-        &first.path,
-        source.replace("enabled: true", "enabled: false"),
-    )
-    .unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(!daemon.directory.join("d/sql").exists());
-    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
-    fs::write(&first.path, source).unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/one/").ends_with('1'));
-
-    let migrations = first.directory.join("migrations");
-    fs::write(
-        migrations.join("0002-note.apply.sql"),
-        "ALTER TABLE counters ADD COLUMN note TEXT;",
-    )
-    .unwrap();
-    fs::write(
-        migrations.join("0002-note.rollback.sql"),
-        "ALTER TABLE counters DROP COLUMN note;",
-    )
-    .unwrap();
-    first.write_component("counter", b"invalid component");
-    assert!(
-        !daemon
-            .call(&["deploy", first.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
-    first.write_component("counter", compiled_component("sql-test"));
-
-    let second = ManifestFixture::new(&source.replace("first", "second").replace("/one", "/two"));
-    second.write_component("counter", compiled_component("sql-test"));
-    write_sql_migrations(&second);
-    daemon.success(&["deploy", second.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/two/read").ends_with('0'));
-    fs::write(&first.path, source.replace("/one", "/two")).unwrap();
-    assert!(
-        !daemon
-            .call(&["deploy", first.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
-    fs::write(&first.path, source).unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/one/schema").ends_with("id,value,note"));
-
-    let rollback = source.replace("enabled: true", "enabled: true, migration-target: 1");
-    fs::write(&first.path, &rollback).unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
-    fs::write(
-        migrations.join("0001-counters.apply.sql"),
-        format!("{SQL_APPLY}\n"),
-    )
-    .unwrap();
-    assert!(
-        !daemon
-            .call(&["deploy", first.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    fs::write(migrations.join("0001-counters.apply.sql"), SQL_APPLY).unwrap();
-    fs::write(
-        migrations.join("0003-broken.apply.sql"),
-        "ALTER TABLE counters ADD COLUMN broken TEXT; SELECT missing FROM absent;",
-    )
-    .unwrap();
-    fs::write(&first.path, source).unwrap();
-    assert!(
-        !daemon
-            .call(&["deploy", first.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert!(
-        http(&address, "GET", "/one/schema").ends_with("id,value"),
-        "whole transition is rolled back"
-    );
-    fs::remove_file(migrations.join("0003-broken.apply.sql")).unwrap();
-    fs::write(&first.path, &rollback).unwrap();
-
-    let admin = AdminFixture::start(&daemon.directory.join("d"));
-    assert!(admin_application(&admin.page(), "first").contains("Migration 1"));
-    assert!(
-        daemon
-            .success(&["daemon", "status"])
-            .contains("\"migration\":1")
-    );
-    daemon.success(&["remove", "first"]);
-    assert!(admin_application(&admin.page(), "first").contains("Disabled · Migration 1"));
-    daemon.success(&["daemon", "stop"]);
-    address = daemon.start();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/one/read").ends_with('1'));
-    assert!(http(&address, "GET", "/one/schema").ends_with("id,value"));
-    assert!(admin_application(&admin.page(), "second").contains("Disabled · Migration 1"));
-    fs::write(
-        &first.path,
-        source.replace("enabled: true", "enabled: false"),
-    )
-    .unwrap();
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/one/disabled").ends_with("disabled"));
-    daemon.success(&["daemon", "stop"]);
 }
 
 #[cfg(unix)]
@@ -1048,9 +755,9 @@ fn help_and_version_succeed() {
     let output = wr(&["run", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("<DIRECTORY>"));
-    assert!(help.contains("--listen <IP:PORT>"));
-    assert!(help.contains("127.0.0.1:8080"));
+    assert!(help.contains("<PATH>"));
+    assert!(help.contains("--listen"));
+    assert!(help.contains("--port"));
 }
 
 #[test]
@@ -2075,65 +1782,6 @@ fn http_serving_routes_requests_and_rejects_collisions() {
 }
 
 #[cfg(unix)]
-struct DaemonFixture {
-    directory: PathBuf,
-}
-
-#[cfg(unix)]
-impl DaemonFixture {
-    fn new() -> Self {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-        // macOS limits Unix socket paths to 104 bytes; the host TMPDIR may be longer.
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join(format!(
-                "wrd-{}-{}",
-                std::process::id(),
-                NEXT_ID.fetch_add(1, Ordering::Relaxed)
-            ));
-        fs::create_dir(&directory).unwrap();
-        Self { directory }
-    }
-
-    fn call(&self, arguments: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_wr"))
-            .arg("--state-dir")
-            .arg(self.directory.join("d"))
-            .args(arguments)
-            .output()
-            .unwrap()
-    }
-
-    fn success(&self, arguments: &[&str]) -> String {
-        let output = self.call(arguments);
-        assert!(
-            output.status.success(),
-            "{arguments:?}: {}\nlog: {}",
-            String::from_utf8_lossy(&output.stderr),
-            fs::read_to_string(self.directory.join("d/daemon.log")).unwrap_or_default()
-        );
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    fn start(&self) -> String {
-        let output = self.success(&["daemon", "start", "--listen", "127.0.0.1:0"]);
-        output
-            .lines()
-            .find_map(|line| line.strip_prefix("Listening on http://"))
-            .unwrap()
-            .to_owned()
-    }
-}
-
-#[cfg(unix)]
-impl Drop for DaemonFixture {
-    fn drop(&mut self) {
-        let _ = self.call(&["daemon", "stop"]);
-        let _ = fs::remove_dir_all(&self.directory);
-    }
-}
-
-#[cfg(unix)]
 fn http(address: &str, method: &str, path: &str) -> String {
     use std::io::{Read, Write};
     let mut stream = std::net::TcpStream::connect(address).unwrap();
@@ -2148,592 +1796,6 @@ fn http(address: &str, method: &str, path: &str) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
-}
-
-#[cfg(unix)]
-struct AdminFixture {
-    child: std::process::Child,
-    address: String,
-}
-
-#[cfg(unix)]
-impl AdminFixture {
-    fn start(state_directory: &std::path::Path) -> Self {
-        use std::{
-            io::{BufRead, BufReader},
-            process::Stdio,
-            sync::mpsc,
-            time::Duration,
-        };
-
-        let mut admin = Self {
-            child: Command::new(env!("CARGO_BIN_EXE_wr"))
-                .arg("--state-dir")
-                .arg(state_directory)
-                .args(["admin", "--listen", "127.0.0.1:0"])
-                .env("ROCKET_ADDRESS", "0.0.0.0")
-                .env("ROCKET_PORT", "1")
-                .current_dir(state_directory.parent().unwrap())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .unwrap(),
-            address: String::new(),
-        };
-        let stdout = admin.child.stdout.take().unwrap();
-        let (sent, received) = mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                if let Some(address) = line.unwrap().strip_prefix("Admin UI listening on http://") {
-                    let _ = sent.send(address.to_owned());
-                    break;
-                }
-            }
-        });
-        admin.address = received
-            .recv_timeout(Duration::from_secs(30))
-            .expect("admin readiness");
-        reader.join().unwrap();
-        assert!(
-            admin
-                .address
-                .parse::<std::net::SocketAddr>()
-                .unwrap()
-                .ip()
-                .is_loopback()
-        );
-        admin
-    }
-
-    fn page(&self) -> String {
-        http(&self.address, "GET", "/")
-    }
-
-    fn stop(&mut self, signal: &str) {
-        assert!(
-            Command::new("kill")
-                .args([signal, &self.child.id().to_string()])
-                .status()
-                .unwrap()
-                .success()
-        );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(status.success());
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "admin shutdown timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        assert!(std::net::TcpStream::connect(&self.address).is_err());
-    }
-}
-
-#[cfg(unix)]
-impl Drop for AdminFixture {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn admin_ui_reports_live_status_and_recovers() {
-    let daemon = DaemonFixture::new();
-    for address in ["0.0.0.0:0", "[::]:0", "192.0.2.1:0"] {
-        let output = daemon.call(&["admin", "--listen", address]);
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("loopback"));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("Admin UI listening"));
-    }
-    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let output = daemon.call(&[
-        "admin",
-        "--listen",
-        &occupied.local_addr().unwrap().to_string(),
-    ]);
-    assert!(!output.status.success());
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Admin UI listening"));
-
-    let mut admin = AdminFixture::start(&daemon.directory.join("d"));
-    assert!(admin.page().starts_with("HTTP/1.1 503"));
-    assert!(
-        http(
-            &admin.address,
-            "GET",
-            "/applications/missing/handlers/missing"
-        )
-        .starts_with("HTTP/1.1 503")
-    );
-    let address = daemon.start();
-    assert!(
-        http(
-            &admin.address,
-            "GET",
-            "/applications/missing/handlers/missing"
-        )
-        .starts_with("HTTP/1.1 404")
-    );
-    let page = admin.page();
-    assert!(page.starts_with("HTTP/1.1 200"));
-    assert!(page.to_lowercase().contains("content-type: text/html"));
-    assert!(page.to_lowercase().contains("cache-control: no-store"));
-    assert!(page.contains(&format!("http://{address}")));
-    assert!(page.contains("No deployed applications."));
-    let status = daemon.success(&["daemon", "status"]);
-    let pid = status
-        .split("PID ")
-        .nth(1)
-        .unwrap()
-        .split(')')
-        .next()
-        .unwrap();
-    assert!(page.contains(&format!("<dd>{pid}</dd>")));
-    assert!(!page.contains("<script"));
-    assert!(
-        page.to_ascii_lowercase()
-            .contains("\r\nrefresh: 5;url=/\r\n")
-    );
-    assert!(!page.contains("class=\"refresh\""));
-    assert!(!page.contains("Live metadata from your selected daemon."));
-    let styles = http(&admin.address, "GET", "/style.css");
-    assert!(styles.starts_with("HTTP/1.1 200"));
-    assert!(styles.to_lowercase().contains("content-type: text/css"));
-    assert!(styles.contains("@media"));
-    assert!(!styles.to_ascii_lowercase().contains("\r\nrefresh:"));
-    assert!(http(&admin.address, "POST", "/").starts_with("HTTP/1.1 404"));
-    daemon.success(&["daemon", "stop"]);
-    let page = admin.page();
-    assert!(page.starts_with("HTTP/1.1 503"));
-    assert!(!page.contains("<dd>Running</dd>"));
-    assert!(
-        page.to_ascii_lowercase()
-            .contains("\r\nrefresh: 5;url=/\r\n")
-    );
-    let address = daemon.start();
-    assert!(admin.page().contains(&format!("http://{address}")));
-    admin.stop("-INT");
-    assert!(daemon.success(&["daemon", "status"]).contains(&address));
-
-    let escaped = AdminFixture::start(&daemon.directory.join("missing<&>\"'"));
-    let page = escaped.page();
-    assert!(page.contains("missing&lt;&amp;&gt;&quot;&#39;"));
-    assert!(!page.contains("missing<&>\"'"));
-}
-
-#[cfg(unix)]
-#[test]
-fn admin_ui_cancels_stalled_metadata_requests() {
-    use std::{
-        io::Read,
-        os::unix::net::UnixListener,
-        time::{Duration, Instant},
-    };
-    let daemon = DaemonFixture::new();
-    let state = daemon.directory.join("d");
-    fs::create_dir(&state).unwrap();
-    let socket = state.join("control.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let admin = AdminFixture::start(&state);
-    std::thread::scope(|scope| {
-        let peer = scope.spawn(|| {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            let mut request = Vec::new();
-            // The client must close its connection after timing out, without a reply.
-            stream.read_to_end(&mut request).unwrap();
-            let request: serde_json::Value = serde_json::from_slice(&request[4..]).unwrap();
-            assert_eq!(request["command"], "status");
-        });
-        let started = Instant::now();
-        let page = admin.page();
-        assert!(page.starts_with("HTTP/1.1 503"));
-        assert!(page.contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(10));
-        peer.join().unwrap();
-    });
-    drop(listener);
-    fs::remove_file(socket).unwrap();
-    assert!(admin.page().starts_with("HTTP/1.1 503"));
-}
-
-#[cfg(unix)]
-#[test]
-fn daemon_lifecycle_owns_both_listeners_and_restarts_empty() {
-    use std::io::{Read, Write};
-    use std::os::unix::fs::PermissionsExt;
-    let daemon = DaemonFixture::new();
-    assert!(!daemon.call(&["daemon", "status"]).status.success());
-    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let output = daemon.call(&[
-        "daemon",
-        "start",
-        "--listen",
-        &occupied.local_addr().unwrap().to_string(),
-    ]);
-    assert!(!output.status.success());
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Listening"));
-    let address = daemon.start();
-    assert!(http(&address, "GET", "/").starts_with("HTTP/1.1 404"));
-    let state = daemon.directory.join("d");
-    // The control server must enforce prefixes even when no manifest loader is involved.
-    for prefix in [None, Some("/invalid/../mount")] {
-        let mut application = serde_json::json!({
-            "name": "direct", "handlers": [{"name": "greet", "method": "GET", "path": "/", "component": []}]
-        });
-        if let Some(prefix) = prefix {
-            application["path-prefix"] = prefix.into();
-        }
-        let bytes = serde_json::to_vec(
-            &serde_json::json!({"command": "deploy", "application": application}),
-        )
-        .unwrap();
-        let mut socket =
-            std::os::unix::net::UnixStream::connect(state.join("control.sock")).unwrap();
-        socket
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
-        socket
-            .write_all(&(bytes.len() as u32).to_be_bytes())
-            .unwrap();
-        socket.write_all(&bytes).unwrap();
-        let mut size = [0; 4];
-        socket.read_exact(&mut size).unwrap();
-        let mut bytes = vec![0; u32::from_be_bytes(size) as usize];
-        socket.read_exact(&mut bytes).unwrap();
-        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(response["result"], "error");
-        assert!(
-            response["message"]
-                .as_str()
-                .unwrap()
-                .contains("path-prefix")
-        );
-    }
-    assert_eq!(
-        fs::metadata(&state).unwrap().permissions().mode() & 0o777,
-        0o700
-    );
-    assert_eq!(
-        fs::metadata(state.join("control.sock"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    let status = daemon.success(&["daemon", "status"]);
-    assert!(status.contains(&address));
-    let log = fs::read(state.join("daemon.log")).unwrap();
-    let repeated = daemon.success(&[
-        "daemon",
-        "start",
-        "--listen",
-        &occupied.local_addr().unwrap().to_string(),
-    ]);
-    assert!(repeated.contains("already running"));
-    assert!(repeated.contains(&address));
-    assert_eq!(daemon.success(&["daemon", "status"]), status);
-    assert_eq!(fs::read(state.join("daemon.log")).unwrap(), log);
-    daemon.success(&["daemon", "stop"]);
-    assert!(!state.join("control.sock").exists());
-    assert!(std::net::TcpStream::connect(&address).is_err());
-    assert!(!daemon.call(&["daemon", "status"]).status.success());
-    // A crash can leave a socket pathname; acquiring the process lock authorizes recovery.
-    let stale = std::os::unix::net::UnixListener::bind(state.join("control.sock")).unwrap();
-    drop(stale);
-    daemon.start();
-    assert!(daemon.success(&["apps", "list"]).is_empty());
-    daemon.success(&["daemon", "stop"]);
-}
-
-#[cfg(unix)]
-#[test]
-fn deployment_replacement_preserves_routes_and_admin_metrics() {
-    let daemon = DaemonFixture::new();
-    let address = daemon.start();
-    let mut admin = AdminFixture::start(&daemon.directory.join("d"));
-    let first = mounted_application(MOUNTED_APPLICATION);
-    let second = mounted_application(
-        &MOUNTED_APPLICATION
-            .replace("name: first", "name: second")
-            .replace("/apps/one", "/apps/one-more"),
-    );
-    for application in [&first, &second] {
-        daemon.success(&["deploy", application.directory.to_str().unwrap()]);
-    }
-    let page = admin.page();
-    assert!(page.contains("/apps/one</code>"));
-    assert!(page.contains("/apps/one-more</code>"));
-    assert!(page.find(">first</th>").unwrap() < page.find(">second</th>").unwrap());
-    let first_row = page
-        .split(">first</th>")
-        .nth(1)
-        .unwrap()
-        .split("</tr>")
-        .next()
-        .unwrap();
-    let functions = [
-        ("echo", "POST", "/echo"),
-        ("files", "GET", "/files/&lt;path..&gt;"),
-        ("greet", "GET", "/hello"),
-        ("inspect", "GET", "/users/&lt;user_id&gt;/orders"),
-        ("root", "GET", "/"),
-    ];
-    let mut previous = 0;
-    for (name, method, path) in functions {
-        let entry =
-            format!("<strong>{name}</strong></a><span><code>{method}</code> <code>{path}</code>");
-        let position = first_row
-            .find(&entry)
-            .expect("deployed function with method and escaped path");
-        assert!(position >= previous, "functions sorted by name");
-        previous = position;
-    }
-    assert!(!page.contains("<user_id>"));
-    assert!(!page.contains("<path..>"));
-    assert!(page.contains("Min — · Max —"));
-    assert!(page.contains("href=\"/applications/first/handlers/greet\""));
-    let detail = http(&admin.address, "GET", "/applications/first/handlers/greet");
-    assert!(detail.starts_with("HTTP/1.1 200"));
-    assert!(detail.contains("No completed calls in this window."));
-    assert!(detail.contains("<dt>Minimum latency</dt><dd>—</dd>"));
-    assert!(detail.contains("href=\"/#applications\""));
-    assert!(
-        detail
-            .to_ascii_lowercase()
-            .contains("\r\nrefresh: 5;url=/applications/first/handlers/greet\r\n")
-    );
-    assert!(
-        detail
-            .to_ascii_lowercase()
-            .contains("cache-control: no-store")
-    );
-    let detail = http(
-        &admin.address,
-        "GET",
-        "/applications/first/handlers/inspect",
-    );
-    assert!(detail.contains("/users/&lt;user_id&gt;/orders"));
-    assert_eq!(daemon.start(), address);
-    assert_eq!(
-        daemon.success(&["apps", "list"]),
-        "first\t/apps/one\nsecond\t/apps/one-more\n"
-    );
-    assert!(
-        daemon
-            .success(&["daemon", "status"])
-            .contains("first\t/apps/one")
-    );
-    for prefix in ["/apps/one", "/apps/one-more"] {
-        for suffix in ["", "/", "/hello"] {
-            assert!(http(&address, "GET", &format!("{prefix}{suffix}")).ends_with("Hello, world!"));
-        }
-        let response = http(&address, "HEAD", &format!("{prefix}/hello"));
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        assert!(
-            response
-                .to_ascii_lowercase()
-                .contains("content-length: 13\r\n")
-        );
-        assert!(response.ends_with("\r\n\r\n"));
-        let response = http(
-            &address,
-            "GET",
-            &format!("{prefix}/users/a%2Fb/orders?tag=a&tag=b&plus=%2B+"),
-        );
-        let body: serde_json::Value =
-            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body["path"], "/users/a%2Fb/orders");
-        assert_eq!(body["path_params"], serde_json::json!([["user_id", "a/b"]]));
-        assert_eq!(
-            body["query"],
-            serde_json::json!([["tag", ["a", "b"]], ["plus", ["+ "]]])
-        );
-        assert!(http(&address, "GET", &format!("{prefix}/files/a/b%20c")).contains("a/b c"));
-        assert!(http(&address, "POST", &format!("{prefix}/echo")).starts_with("HTTP/1.1 400"));
-        assert!(http(&address, "GET", &format!("{prefix}/echo")).starts_with("HTTP/1.1 404"));
-    }
-    for path in [
-        "/hello",
-        "/apps/on",
-        "/apps/ones/hello",
-        "/apps/%6Fne/hello",
-        "/apps/one/missing",
-    ] {
-        assert!(
-            http(&address, "GET", path).starts_with("HTTP/1.1 404"),
-            "{path}"
-        );
-    }
-
-    for name in ["first", "second"] {
-        let detail = http(
-            &admin.address,
-            "GET",
-            &format!("/applications/{name}/handlers/greet"),
-        );
-        assert!(
-            detail.contains("<dt>Completed calls</dt><dd>2</dd>"),
-            "{name}: {detail}"
-        );
-        assert!(detail.contains("<th scope=\"row\">200</th><td>2</td>"));
-        assert!(!detail.contains("<dd>—</dd>"));
-        let detail = http(
-            &admin.address,
-            "GET",
-            &format!("/applications/{name}/handlers/echo"),
-        );
-        assert!(detail.contains("<dt>Completed calls</dt><dd>1</dd>"));
-        assert!(detail.contains("<th scope=\"row\">400</th><td>1</td>"));
-    }
-    let before_failure = admin.page();
-    fs::write(
-        first.directory.join(".wr/components/greet.wasm"),
-        b"invalid",
-    )
-    .unwrap();
-    assert!(
-        !daemon
-            .call(&["deploy", first.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert_eq!(
-        admin.page().split_once("\r\n\r\n").unwrap().1,
-        before_failure.split_once("\r\n\r\n").unwrap().1,
-        "failed deployment preserves function metadata and metrics"
-    );
-    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
-    first.write_component("greet", compiled_component("greet"));
-
-    // A small candidate keeps prefix-conflict checks from recompiling unrelated handlers.
-    let greeting = "name: first\npath-prefix: /apps/one\nfunctions:\n  greet:\n    http: {method: GET, path: /hello}\n";
-    // Equal, descendant, ancestor, and root mounts conflict even with independent routers.
-    for prefix in ["/apps/one-more", "/apps/one-more/nested", "/apps", "/"] {
-        fs::write(&first.path, greeting.replace("/apps/one", prefix)).unwrap();
-        let output = daemon.call(&["deploy", first.directory.to_str().unwrap()]);
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps"));
-        assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
-        assert!(http(&address, "GET", "/apps/one-more/hello").ends_with("Hello, world!"));
-    }
-    // Conflicting routes inside one application still fail before replacing its mount.
-    fs::write(
-        &first.path,
-        MOUNTED_APPLICATION.replace("path: /}", "path: /hello}"),
-    )
-    .unwrap();
-    assert!(
-        !daemon
-            .call(&["deploy", first.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
-
-    fs::write(
-        &first.path,
-        greeting
-            .replace("/apps/one", "/replacement")
-            .replace("path: /hello", "path: /updated-hello"),
-    )
-    .unwrap();
-    std::thread::scope(|scope| {
-        let requests = scope.spawn(|| {
-            for _ in 0..40 {
-                assert!(http(&address, "GET", "/apps/one-more/hello").ends_with("Hello, world!"));
-            }
-        });
-        daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-        requests.join().unwrap();
-    });
-    let detail = http(&admin.address, "GET", "/applications/first/handlers/greet");
-    assert!(detail.contains("No completed calls in this window."));
-    assert!(detail.contains("/updated-hello</code>"));
-    assert!(
-        http(&admin.address, "GET", "/applications/first/handlers/echo")
-            .starts_with("HTTP/1.1 404")
-    );
-    let detail = http(&admin.address, "GET", "/applications/second/handlers/greet");
-    assert!(detail.contains("<dt>Completed calls</dt><dd>46</dd>"));
-    assert!(http(&address, "GET", "/apps/one/hello").starts_with("HTTP/1.1 404"));
-    assert!(http(&address, "GET", "/replacement/updated-hello").ends_with("Hello, world!"));
-    let page = admin.page();
-    assert!(page.contains("/replacement</code>"));
-    assert!(!page.contains("/apps/one</code>"));
-    let first_row = page
-        .split(">first</th>")
-        .nth(1)
-        .unwrap()
-        .split("</tr>")
-        .next()
-        .unwrap();
-    assert!(first_row.contains("<strong>greet</strong>"));
-    assert!(first_row.contains("<code>/updated-hello</code>"));
-    assert!(!first_row.contains("<strong>echo</strong>"));
-    assert!(!first_row.contains("<code>/hello</code>"));
-    let second_row = page
-        .split(">second</th>")
-        .nth(1)
-        .unwrap()
-        .split("</tr>")
-        .next()
-        .unwrap();
-    assert!(second_row.contains("<strong>echo</strong>"));
-    assert!(second_row.contains("<code>/hello</code>"));
-    assert!(
-        daemon
-            .success(&["apps", "list"])
-            .contains("first\t/replacement")
-    );
-    daemon.success(&["remove", "first"]);
-    let page = admin.page();
-    assert!(!page.contains(">first</th>"));
-    assert!(page.contains(">second</th>"));
-    assert!(!page.contains("<code>/updated-hello</code>"));
-    assert!(
-        http(&admin.address, "GET", "/applications/first/handlers/greet")
-            .starts_with("HTTP/1.1 404")
-    );
-    assert!(http(&address, "GET", "/replacement/updated-hello").starts_with("HTTP/1.1 404"));
-    assert_eq!(
-        daemon.success(&["apps", "list"]),
-        "second\t/apps/one-more\n"
-    );
-    assert!(!daemon.call(&["remove", "missing"]).status.success());
-
-    // A sole application may take the root mount; no other mount can coexist with it.
-    fs::write(&first.path, MOUNTED_APPLICATION.replace("/apps/one", "/")).unwrap();
-    daemon.success(&["remove", "second"]);
-    daemon.success(&["deploy", first.directory.to_str().unwrap()]);
-    assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
-    assert!(
-        !daemon
-            .call(&["deploy", second.directory.to_str().unwrap()])
-            .status
-            .success()
-    );
-    fs::remove_file(first.directory.join(".wr/components/greet.wasm")).unwrap();
-    assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
-    let page = admin.page();
-    assert!(page.contains(">first</th>"));
-    assert!(page.contains("<code>/</code>"));
-    assert!(page.contains("<strong>greet</strong></a><span><code>GET</code> <code>/hello</code>"));
-    admin.stop("-TERM");
-    assert!(http(&address, "GET", "/hello").ends_with("Hello, world!"));
-    daemon.success(&["daemon", "stop"]);
-    let address = daemon.start();
-    assert!(daemon.success(&["apps", "list"]).is_empty());
-    assert!(http(&address, "GET", "/hello").starts_with("HTTP/1.1 404"));
-    daemon.success(&["daemon", "stop"]);
 }
 
 #[test]
@@ -2764,7 +1826,7 @@ fn manifests_require_literal_canonical_path_prefixes() {
         assert!(!fixture.directory.join(".wr").exists());
     }
     let fixture = ManifestFixture::new(&EXAMPLE.replace("path-prefix: /\n", ""));
-    for command in ["setup", "run", "deploy"] {
+    for command in ["setup", "run"] {
         let output = wr(&[command, fixture.directory.to_str().unwrap()]);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("path-prefix"));
@@ -2799,31 +1861,123 @@ fn foreground_serving_honors_application_prefix() {
             let _ = self.0.wait();
         }
     }
-    let mut running = Running(
-        Command::new(env!("CARGO_BIN_EXE_wr"))
-            .arg("run")
-            .arg(&application.directory)
-            .args(["--listen", "127.0.0.1:0"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
-    let stdout = running.0.stdout.take().unwrap();
-    let (sent, received) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let line = line.unwrap();
-            if let Some(address) = line.strip_prefix("Listening on http://") {
-                let _ = sent.send(address.to_owned());
-                break;
+    for restart in 0..2 {
+        let mut running = Running(
+            Command::new(env!("CARGO_BIN_EXE_wr"))
+                .arg("run")
+                .arg(&application.path)
+                .args(["--port", "0", "--admin-listen", "127.0.0.1:0"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let stdout = running.0.stdout.take().unwrap();
+        let (sent, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let line = line.unwrap();
+                if let Some(address) = line.strip_prefix("Listening on http://") {
+                    let _ = sent.send((false, address.to_owned()));
+                }
+                if let Some(address) = line.strip_prefix("Admin UI listening on http://") {
+                    let _ = sent.send((true, address.to_owned()));
+                }
+            }
+        });
+        let mut address = String::new();
+        let mut admin = String::new();
+        for _ in 0..2 {
+            let (is_admin, bound) = received
+                .recv_timeout(Duration::from_secs(30))
+                .expect("foreground readiness");
+            if is_admin {
+                admin = bound;
+            } else {
+                address = bound;
             }
         }
-    });
-    let address = received
-        .recv_timeout(Duration::from_secs(30))
-        .expect("foreground readiness");
-    reader.join().unwrap();
-    assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
-    assert!(http(&address, "GET", "/hello").starts_with("HTTP/1.1 404"));
+        assert!(http(&address, "GET", "/apps/one/hello").ends_with("Hello, world!"));
+        assert!(http(&address, "GET", "/hello").starts_with("HTTP/1.1 404"));
+        assert!(http(&admin, "GET", "/ready").starts_with("HTTP/1.1 200"));
+        let response = http(&admin, "GET", "/status");
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let status: serde_json::Value =
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(status["ready"], true);
+        let applications = status["applications"].as_object().unwrap();
+        assert_eq!(applications.len(), 1);
+        assert_eq!(
+            applications["first"],
+            serde_json::json!({
+                "source_commit": null,
+                "desired_version": null,
+                "active_version": null,
+                "active_digest": null,
+                "error": null,
+            })
+        );
+        assert!(http(&admin, "GET", "/").contains("Handler latency"));
+        let locked = wr(&["run", application.path.to_str().unwrap(), "--port", "0"]);
+        assert!(!locked.status.success());
+        assert!(String::from_utf8_lossy(&locked.stderr).contains("owns this state directory"));
+        if restart == 0 {
+            running.0.kill().unwrap();
+            running.0.wait().unwrap();
+        } else {
+            Command::new("kill")
+                .args(["-TERM", &running.0.id().to_string()])
+                .status()
+                .unwrap();
+            assert!(running.0.wait().unwrap().success());
+        }
+        reader.join().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn package_exports_a_complete_deterministic_release_without_building() {
+    use sha2::{Digest, Sha256};
+    let fixture = ManifestFixture::new(
+        "name: hello\npath-prefix: /hello\npublish: {registry: registry.example/team, version: '1.0'}\nsql: {enabled: true}\nfunctions:\n  greet:\n    http: {method: GET, path: /}\n",
+    );
+    fixture.write_component("greet", b"prebuilt-component");
+    let first = fixture.directory.join("package-one");
+    let second = fixture.directory.join("package-two");
+    for output in [&first, &second] {
+        let result = wr(&[
+            "package",
+            fixture.path.to_str().unwrap(),
+            "--source-commit",
+            &"a".repeat(40),
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    for artifact in ["functions/greet", "migrations", "release"] {
+        let first = first.join(artifact);
+        let second = second.join(artifact);
+        let index = fs::read(first.join("index.json")).unwrap();
+        assert_eq!(index, fs::read(second.join("index.json")).unwrap());
+        let index: serde_json::Value = serde_json::from_slice(&index).unwrap();
+        let digest = index["manifests"][0]["digest"].as_str().unwrap();
+        let manifest = fs::read(first.join("blobs/sha256").join(&digest[7..])).unwrap();
+        assert_eq!(format!("sha256:{:x}", Sha256::digest(&manifest)), digest);
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        let blob = manifest["layers"][0]["digest"].as_str().unwrap();
+        let bytes = fs::read(first.join("blobs/sha256").join(&blob[7..])).unwrap();
+        assert_eq!(format!("sha256:{:x}", Sha256::digest(&bytes)), blob);
+        assert_eq!(
+            bytes.len() as u64,
+            manifest["layers"][0]["size"].as_u64().unwrap()
+        );
+    }
+    assert!(!fixture.directory.join("Cargo.toml").exists());
+    assert!(!fixture.directory.join(".wr-data").exists());
 }

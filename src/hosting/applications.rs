@@ -56,6 +56,18 @@ pub(crate) struct FunctionInfo {
 }
 
 impl Applications {
+    pub(crate) async fn deploy(&self, deployment: super::deployment::Deployment) -> Result<()> {
+        deployment.validate()?;
+        self.install(
+            deployment.name,
+            deployment.path_prefix,
+            deployment.handlers,
+            deployment.kv,
+            deployment.sql,
+            deployment.migrations,
+        )
+        .await
+    }
     pub(crate) fn new(config: Config) -> Result<Arc<Self>> {
         Self::with_storage(config, None)
     }
@@ -155,7 +167,7 @@ impl Applications {
     ) -> Result<()> {
         ensure!(
             !self.state.stopping.load(Ordering::SeqCst),
-            "daemon is stopping"
+            "host is stopping"
         );
         validate_prefix(&path_prefix)?;
         sql.validate()?;
@@ -225,7 +237,7 @@ impl Applications {
         let mut current = self.current.write().expect("application registry");
         ensure!(
             !self.state.stopping.load(Ordering::SeqCst),
-            "daemon is stopping"
+            "host is stopping"
         );
         let previous = current.insert(name, application);
         drop(current);
@@ -237,7 +249,7 @@ impl Applications {
         let current = self.current.read().expect("application registry");
         ensure!(
             !self.state.stopping.load(Ordering::SeqCst),
-            "daemon is stopping"
+            "host is stopping"
         );
         for (other_name, other) in current
             .iter()
@@ -259,7 +271,7 @@ impl Applications {
         let mut current = self.current.write().expect("application registry");
         ensure!(
             !self.state.stopping.load(Ordering::SeqCst),
-            "daemon is stopping"
+            "host is stopping"
         );
         let previous = current.remove(name);
         drop(current);

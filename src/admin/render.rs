@@ -13,17 +13,24 @@ pub(super) fn overview(
     applications: &[ApplicationInfo],
     storage: &StorageInfo,
     sql: &[SqlInfo],
+    status: &crate::deployment::Status,
 ) -> String {
     let mut content = String::new();
     write!(
         content,
-        r#"<section id="daemon">
-    <h2>Daemon</h2>
+        r#"<section id="host">
+    <h2>Host</h2>
     <dl>
       <div><dt>Status</dt><dd>Running</dd></div>
       <div><dt>Process ID</dt><dd>{pid}</dd></div>
       <div><dt>Hosting address</dt><dd><code>http://{listen}</code></dd></div>
     </dl>"#,
+    )
+    .unwrap();
+    write!(
+        content,
+        "<h3>Deployment status</h3><pre>{}</pre>",
+        escape(&serde_json::to_string_pretty(status).expect("serializable status"))
     )
     .unwrap();
     render_database(&mut content, storage);
@@ -179,9 +186,9 @@ pub(super) fn missing_handler() -> String {
 pub(super) fn unavailable(message: &str) -> String {
     page(&format!(
         r#"<section class="error" role="alert">
-  <h2>Daemon metadata unavailable</h2>
+  <h2>Host metadata unavailable</h2>
   <p>{}</p>
-  <p>Check that the selected daemon is running.</p>
+  <p>Check that the host is running.</p>
 </section>"#,
         escape(message)
     ))

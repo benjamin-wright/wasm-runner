@@ -10,14 +10,20 @@ The example includes a [SQL-backed HTML page rendered with Askama](docs/guides.m
 `wr setup` prepares a guest Cargo workspace, `wr update` creates or refreshes
 the application's dependency lockfile, `wr build` compiles components using
 locked dependencies by default, and `wr clean` removes generated files and build
-outputs. On Unix, `wr daemon start` starts a background host and `wr deploy`
-adds or replaces applications at their declared `path-prefix` without restarting it. `wr apps list`, `wr remove`,
-and `wr daemon status`/`stop` manage the running host. `wr admin` opens a local
-HTTP listener for a read-only browser overview of the selected daemon, including
-each application's deployed functions, routes, and rolling handler metrics. See
-[browser inspection](docs/guides.md#inspect-the-daemon-in-a-browser). Deployments are held in
-memory. `wr run` remains available for foreground serving. The hosting listener
-defaults to `127.0.0.1:8080`; the library exposes a reusable runtime and HTTP server.
+outputs. `wr run <PATH> --port 8081` serves one local application in the
+foreground. `wr start` follows a public Git deployment configuration and
+application manifests, pulls complete OCI releases, and reconciles application
+membership and versions without restarting the host. A process manager owns
+startup and restarts. Verified releases and accepted configuration survive
+restart in a locked state directory.
+
+Both commands support a separate, read-only loopback admin listener via
+`--admin-listen`, with application metadata, storage inspection, handler metrics,
+and health endpoints. See [production deployment](docs/guides.md#manage-multiple-applications)
+and [browser inspection](docs/guides.md#inspect-the-host-in-a-browser).
+`wr package` produces local OCI layouts for CI to upload; WR does not push
+artifacts or require private repository credentials. The library continues to
+expose a reusable runtime and HTTP server.
 
 ## Get started
 
