@@ -111,3 +111,4 @@ There is no local file watcher or automatic build on run.
 
 For automatic production updates from public Git repositories and OCI registries,
 follow [Manage multiple applications](guides.md#manage-multiple-applications).
+To provision and supervise the runner itself, use the [operations guide](operations.md).

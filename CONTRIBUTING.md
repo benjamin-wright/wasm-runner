@@ -145,6 +145,7 @@ contracts; prose explains their use and limitations rather than reproducing them
 | [README](README.md) | Current capability summary and reader navigation |
 | [Getting started](docs/getting-started.md) | Installation and a guided first build with observable outcomes |
 | [Common tasks](docs/guides.md) | Recipes for authoring, dependencies, editor use, builds, and recovery |
+| [Operations](docs/operations.md) | Host provisioning, supervision, upgrade, and recovery procedures; exact runner guarantees remain in the reference |
 | [Reference](docs/reference.md) | Exact commands, manifest model, validation stages, generated files, preservation and failure behavior |
 | [Guest notes](wit/README.md) and [WIT](wit/world.wit) | Handler authoring and the authoritative guest interface |
 | [Schema](application.schema.json) | Manifest field shapes and constraints |
@@ -155,6 +156,7 @@ contracts; prose explains their use and limitations rather than reproducing them
 | [Makefile](Makefile) and [toolchain configuration](rust-toolchain.toml) | Executable lifecycle commands and toolchain selection |
 | [Agent instructions](AGENTS.md) and [skills](.agents/skills) | Agent operating rules and conditional procedures that use these shared documents |
 | [Shareable application skill](skills/wasm-runner/SKILL.md) | Portable application-author workflow summaries; exact behavior remains in the reference, schema, and WIT |
+| [Shareable operator skill](skills/wasm-runner-ops/SKILL.md) | Agent workflow for runner operations; detailed procedures remain in the operations guide |
 
 ### Maintain documentation with each change
 
@@ -173,5 +175,3 @@ During review, check that detailed facts have clear owners, summaries agree,
 links and referenced assets resolve, and a reader can finish the documented
 task. Preserve validation, ownership, and failure guarantees when moving
 content. Keep accepted requirements distinct from future possibilities.
-The dated [documentation review](DOCUMENTATION_REVIEW.md) is migration history,
-not a maintained source of product behavior.

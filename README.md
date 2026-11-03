@@ -37,6 +37,7 @@ involving Cargo or the WASM target, start with the
 | I want to… | Read |
 | --- | --- |
 | Build my first application | [Getting started](docs/getting-started.md) |
+| Install, supervise, upgrade, or recover a production host | [Operations](docs/operations.md) |
 | Add functions or dependencies, configure VS Code, or clean outputs | [Common tasks](docs/guides.md) |
 | Look up commands, validation, generated files, or failure guarantees | [Command and manifest reference](docs/reference.md) |
 | Write a Rust guest handler | [Guest contract](wit/README.md) |
@@ -51,7 +52,7 @@ not WASI HTTP. Applications can opt into [persistent typed KV storage](docs/refe
 including atomic counters, and [embedded SQL with streaming cursors and deployment migrations](docs/reference.md#persistent-application-sql).
 Non-HTTP event handling is not implemented.
 
-## Shareable agent skill
+## Shareable agent skills
 
 The [wasm-runner skill](skills/wasm-runner/SKILL.md) guides application authors
 through application setup, handlers, available features, building, and serving,
@@ -61,3 +62,13 @@ references and agent metadata, into your agent's skills directory. For Codex,
 use `$CODEX_HOME/skills/wasm-runner` (normally `~/.codex/skills/wasm-runner`).
 Invoke it with, for example, “Use $wasm-runner to create and run a greeting API.”
 The skill is portable; installing it does not install the `wr` CLI or Rust tools.
+
+The [wasm-runner-ops skill](skills/wasm-runner-ops/SKILL.md) covers runner
+installation, production service configuration, health checks, upgrades, and
+recovery. Copy its [skill folder](skills/wasm-runner-ops) into
+`$CODEX_HOME/skills/wasm-runner-ops` and make the matching runner documentation
+available to the agent through a source checkout or your documentation source.
+Its canonical procedure is the [operations guide](docs/operations.md); the
+production machine does not need that checkout. For example: “Use
+$wasm-runner-ops to configure a supervised GitOps host.” Installing the skill
+does not provision or start a service.

@@ -336,6 +336,10 @@ and is separate from this timeout.
 
 ## Manage multiple applications
 
+For runner installation, service supervision, upgrades, and state recovery, use
+the [operations guide](operations.md). This recipe covers app registration and
+artifact publication.
+
 Production uses `wr start` under your process manager. Keep a deployment file
 in a public repository:
 

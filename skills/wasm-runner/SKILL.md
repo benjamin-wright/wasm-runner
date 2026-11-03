@@ -1,6 +1,6 @@
 ---
 name: wasm-runner
-description: Create, build, and run Rust HTTP applications using an installed wr CLI. Use for application manifests, handlers, routes, dependencies, and application troubleshooting. Assumes wr is installed; excludes framework installation and contributor workflows.
+description: Create, build, and run Rust HTTP applications using an installed wr CLI. Use for application manifests, handlers, routes, dependencies, and application troubleshooting. Assumes wr is installed; excludes runner installation, production host administration, and contributor workflows.
 ---
 
 # Build applications with WASM Runner

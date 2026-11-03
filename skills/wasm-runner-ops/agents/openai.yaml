@@ -1,0 +1,4 @@
+interface:
+  display_name: "WASM Runner Operations"
+  short_description: "Install, supervise, and recover WASM Runner hosts"
+  default_prompt: "Use $wasm-runner-ops to configure and verify a supervised GitOps host."
