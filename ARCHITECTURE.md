@@ -99,8 +99,11 @@ flowchart TD
     HTTP[Hosting listener] --> Publish
 ```
 
-Run and package read existing components without invoking Cargo. Package writes
-one OCI layout for an external CI publisher. Its application manifest contains the
+Run, package, and publish read existing components without invoking Cargo.
+Package prepares one OCI application manifest and writes it for an external CI
+publisher; publish sends the same prepared manifest and layers directly to the
+configured registry. Registry credentials are an environment-only command concern
+and remain outside cached deployment state. The application manifest contains the
 release record and every component or migration layer, while the release record
 binds the complete normalized artifact set. Production reads only manifests from
 Git, never checks out application code or invokes application builds. The

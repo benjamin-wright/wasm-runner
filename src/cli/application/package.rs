@@ -12,6 +12,7 @@ pub(crate) struct Package {
 
 impl Package {
     pub fn execute(self) -> Result<()> {
-        crate::deployment::package::write(&self.path, &self.output)
+        let prepared = crate::deployment::package::prepare(&self.path)?;
+        crate::deployment::package::write(&prepared, &self.output)
     }
 }

@@ -19,7 +19,8 @@ local component and migration paths resolve relative to that manifest.
 | `wr update <DIRECTORY>` | Explicitly refresh application dependencies without compiling. |
 | `wr clean <DIRECTORY>` | Remove generated workspace files and build outputs. |
 | `wr run <PATH> [--port <PORT>] [--listen <IP:PORT>]` | Serve local built components in the foreground. Port and listen are mutually exclusive; the default is loopback port 8080. |
-| `wr package <PATH> --output <NEW_DIRECTORY>` | Write one OCI layout for CI to upload; never builds or pushes. |
+| `wr package <PATH> --output <NEW_DIRECTORY>` | Write one OCI layout for external upload; never builds or pushes. |
+| `wr publish <PATH>` | Package and push the configured application artifact; never builds. |
 | `wr start --config-repo <URL> --state-dir <DIRECTORY>` | Reconcile public Git and OCI releases in the foreground. |
 
 Both hosts accept `--admin-listen <LOOPBACK_IP:PORT>` for a separate read-only
@@ -857,19 +858,33 @@ The registry is an OCI hostname plus namespace, without a scheme, tag, or
 credentials. The version is a literal OCI tag. The schema specifies their exact
 shapes. Local run ignores these publishing fields and uses local components.
 
-After building, CI runs:
+After building, CI normally publishes directly:
+
+```sh
+wr publish ./application.yaml
+```
+
+Publish validates the manifest, existing component files, and migration records,
+then uploads one complete artifact to `<registry>/<application>:<version>`. It
+does not invoke Cargo, inspect Git, compile Wasm, execute SQL, or create a package
+directory. Credentials come only from the environment: set `WR_REGISTRY_TOKEN`,
+or set both `WR_REGISTRY_USERNAME` and `WR_REGISTRY_PASSWORD`; set neither mode for
+anonymous access. Mixed token and username/password configuration, incomplete
+basic credentials, and empty values fail locally. WR does not parse `.env` files
+or persist credentials; the shell, `direnv`, or CI is responsible for injection.
+
+For an external publisher, use the export form instead:
 
 ```sh
 wr package ./application.yaml --output ./release-output
 ```
 
-Package validates the manifest, existing component files, and migration records;
-it does not invoke Cargo, inspect Git, compile Wasm, execute SQL, or upload. The
-output must not already exist. A filesystem error can leave a partial output
-directory; only upload after a successful command. The application manifest is
-the source of the publication version. CI owns source provenance, including tying
-that version to a Git tag or attestation, and owns proving that the existing
-components came from a clean, successful build.
+Package performs the same validation and produces the same OCI content without
+uploading. The output must not already exist. A filesystem error can leave a
+partial output directory; only upload after a successful command. The application
+manifest is the source of the publication version. CI owns source provenance,
+including tying that version to a Git tag or attestation, and owns proving that
+the existing components came from a clean, successful build.
 
 The output is one OCI image layout with `oci-layout`, `index.json`, and
 content-addressed `blobs/sha256/`. Its artifact type is

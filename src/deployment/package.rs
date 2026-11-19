@@ -3,10 +3,30 @@ use super::release::{
 };
 use crate::project::{manifest, package};
 use anyhow::{Context, Result, ensure};
-use serde_json::{Value, json};
+use oci_client::manifest::{OciDescriptor, OciImageManifest};
+use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path};
 
-pub(crate) fn write(application: &Path, output: &Path) -> Result<()> {
+const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+const EMPTY_TYPE: &str = "application/vnd.oci.empty.v1+json";
+const TITLE: &str = "org.opencontainers.image.title";
+
+pub(crate) struct PreparedPackage {
+    pub(crate) name: String,
+    pub(crate) registry: String,
+    pub(crate) version: String,
+    pub(crate) manifest: OciImageManifest,
+    pub(crate) manifest_bytes: Vec<u8>,
+    pub(crate) config: Vec<u8>,
+    pub(crate) layers: Vec<PreparedLayer>,
+}
+
+pub(crate) struct PreparedLayer {
+    pub(crate) descriptor: OciDescriptor,
+    pub(crate) bytes: Vec<u8>,
+}
+
+pub(crate) fn prepare(application: &Path) -> Result<PreparedPackage> {
     let manifest = manifest::load(application)?;
     let publish = manifest
         .publish
@@ -27,12 +47,16 @@ pub(crate) fn write(application: &Path, output: &Path) -> Result<()> {
         release
             .functions
             .insert(handler.name.clone(), descriptor(&handler.component));
-        payloads.push((handler.component, layer(COMPONENT_TYPE, handler.name)));
+        payloads.push(prepared_layer(
+            COMPONENT_TYPE,
+            handler.name,
+            handler.component,
+        ));
     }
     if deployment.sql.enabled {
         let bytes = serde_json::to_vec(&deployment.migrations)?;
         release.migrations = Some(descriptor(&bytes));
-        payloads.push((bytes, layer(MIGRATIONS_TYPE, "migrations")));
+        payloads.push(prepared_layer(MIGRATIONS_TYPE, "migrations", bytes));
     }
     release.validate()?;
 
@@ -41,37 +65,51 @@ pub(crate) fn write(application: &Path, output: &Path) -> Result<()> {
         release_bytes.len() <= 1024 * 1024,
         "release descriptor exceeds 1 MiB"
     );
+    let release_layer = prepared_layer(RELEASE_TYPE, "release", release_bytes);
+    let mut layers = vec![release_layer];
+    layers.extend(payloads);
+    let config = b"{}".to_vec();
+    let manifest = OciImageManifest {
+        schema_version: 2,
+        media_type: Some(MANIFEST_TYPE.into()),
+        config: oci_descriptor(EMPTY_TYPE, &config, None),
+        layers: layers
+            .iter()
+            .map(|layer| layer.descriptor.clone())
+            .collect(),
+        subject: None,
+        artifact_type: Some(APPLICATION_TYPE.into()),
+        annotations: None,
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+
+    Ok(PreparedPackage {
+        name: deployment.name,
+        registry: publish.registry.clone(),
+        version: publish.version.clone(),
+        manifest,
+        manifest_bytes,
+        config,
+        layers,
+    })
+}
+
+pub(crate) fn write(prepared: &PreparedPackage, output: &Path) -> Result<()> {
     ensure!(
         !output.exists(),
         "package output already exists; select a new output directory"
     );
 
-    let release_layer = layer(RELEASE_TYPE, "release");
-    let mut layers = vec![descriptor_json(release_layer, &release_bytes)];
-    let mut blobs = vec![(descriptor(&release_bytes), release_bytes)];
-    for (bytes, media) in payloads {
-        let artifact = descriptor(&bytes);
-        layers.push(descriptor_json(media, &bytes));
-        blobs.push((artifact, bytes));
-    }
-    let manifest = serde_json::to_vec(&json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "artifactType": APPLICATION_TYPE,
-        "config": {"mediaType": "application/vnd.oci.empty.v1+json", "digest": digest(b"{}"), "size": 2},
-        "layers": layers
-    }))?;
-    let manifest_digest = digest(&manifest);
-    let manifest_size = manifest.len();
-
-    fs::create_dir_all(output.join("blobs/sha256"))?;
+    let blobs = output.join("blobs/sha256");
+    fs::create_dir_all(&blobs)?;
+    let manifest_digest = digest(&prepared.manifest_bytes);
+    fs::write(blobs.join(&manifest_digest[7..]), &prepared.manifest_bytes)?;
     fs::write(
-        output.join("blobs/sha256").join(&manifest_digest[7..]),
-        manifest,
+        blobs.join(&prepared.manifest.config.digest[7..]),
+        &prepared.config,
     )?;
-    fs::write(output.join("blobs/sha256").join(&digest(b"{}")[7..]), b"{}")?;
-    for (artifact, bytes) in blobs {
-        fs::write(output.join("blobs/sha256").join(&artifact.blob[7..]), bytes)?;
+    for layer in &prepared.layers {
+        fs::write(blobs.join(&layer.descriptor.digest[7..]), &layer.bytes)?;
     }
     fs::write(
         output.join("oci-layout"),
@@ -79,14 +117,20 @@ pub(crate) fn write(application: &Path, output: &Path) -> Result<()> {
     )?;
     fs::write(
         output.join("index.json"),
-        serde_json::to_vec(
-            &json!({"schemaVersion": 2, "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": manifest_digest, "size": manifest_size, "annotations": {"org.opencontainers.image.ref.name": publish.version}}]}),
-        )?,
+        serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "manifests": [{
+                "mediaType": MANIFEST_TYPE,
+                "digest": manifest_digest,
+                "size": prepared.manifest_bytes.len(),
+                "annotations": {"org.opencontainers.image.ref.name": prepared.version}
+            }]
+        }))?,
     )?;
     println!(
         "Packaged {}:{} at {}",
-        deployment.name,
-        publish.version,
+        prepared.name,
+        prepared.version,
         output.display()
     );
     Ok(())
@@ -99,19 +143,19 @@ fn descriptor(bytes: &[u8]) -> Artifact {
     }
 }
 
-fn layer(media_type: &str, name: impl Into<String>) -> (&str, Value) {
-    (
-        media_type,
-        json!({"org.opencontainers.image.title": name.into()}),
-    )
+fn prepared_layer(media_type: &str, title: impl Into<String>, bytes: Vec<u8>) -> PreparedLayer {
+    PreparedLayer {
+        descriptor: oci_descriptor(media_type, &bytes, Some(title.into())),
+        bytes,
+    }
 }
 
-fn descriptor_json((media_type, annotations): (&str, Value), bytes: &[u8]) -> Value {
-    let artifact = descriptor(bytes);
-    json!({
-        "mediaType": media_type,
-        "digest": artifact.blob,
-        "size": artifact.size,
-        "annotations": annotations
-    })
+fn oci_descriptor(media_type: &str, bytes: &[u8], title: Option<String>) -> OciDescriptor {
+    OciDescriptor {
+        media_type: media_type.into(),
+        digest: digest(bytes),
+        size: bytes.len() as i64,
+        urls: None,
+        annotations: title.map(|title| BTreeMap::from([(TITLE.into(), title)])),
+    }
 }

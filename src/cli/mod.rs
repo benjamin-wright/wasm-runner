@@ -1,6 +1,6 @@
 mod application;
 mod start;
-use application::{build, clean, package, run, setup, update};
+use application::{build, clean, package, publish, run, setup, update};
 
 use std::path::{Path, PathBuf, absolute};
 
@@ -25,6 +25,7 @@ enum Command {
     Clean(clean::Clean),
     Run(run::Run),
     Package(package::Package),
+    Publish(publish::Publish),
     Start(start::Start),
 }
 
@@ -37,6 +38,7 @@ pub fn execute() -> Result<()> {
         Command::Clean(command) => command.execute(),
         Command::Run(command) => command.execute(cli.state_dir),
         Command::Package(command) => command.execute(),
+        Command::Publish(command) => command.execute(),
         Command::Start(command) => command.execute(cli.state_dir),
     }
 }

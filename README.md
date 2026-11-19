@@ -21,9 +21,10 @@ Both commands support a separate, read-only loopback admin listener via
 `--admin-listen`, with application metadata, storage inspection, handler metrics,
 and health endpoints. See [production deployment](docs/guides.md#manage-multiple-applications)
 and [browser inspection](docs/guides.md#inspect-the-host-in-a-browser).
-`wr package` produces one local OCI layout for CI to upload; WR does not push
-artifacts or require private repository credentials. The library continues to
-expose a reusable runtime and HTTP server.
+`wr publish` packages and pushes the configured application artifact using
+credentials from the environment. `wr package` remains available when an external
+CI publisher should upload the OCI layout instead. The library continues to expose
+a reusable runtime and HTTP server.
 
 ## Get started
 

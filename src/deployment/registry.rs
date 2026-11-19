@@ -1,14 +1,16 @@
+use super::package::PreparedPackage;
 use super::release::{
     APPLICATION_TYPE, Artifact, COMPONENT_TYPE, LIMIT, MIGRATIONS_TYPE, RELEASE_TYPE, Release,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use oci_client::{
     Client, Reference,
-    client::{ClientConfig, ClientProtocol},
+    client::{ClientConfig, ClientProtocol, Config, ImageLayer},
     manifest::{OciDescriptor, OciImageManifest},
     secrets::RegistryAuth,
 };
 use std::{
+    env,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -71,7 +73,8 @@ impl Registry {
     pub async fn release(&self, application: &str, version: &str) -> Result<(String, Release)> {
         let reference: Reference = format!("{application}:{version}").parse()?;
         tokio::time::timeout(Duration::from_secs(60), async {
-            let (manifest, manifest_digest) = self.manifest(&reference).await?;
+            let (manifest, manifest_digest) =
+                self.manifest(&reference, &RegistryAuth::Anonymous).await?;
             ensure!(
                 manifest.artifact_type.as_deref() == Some(APPLICATION_TYPE),
                 "invalid WR application artifact type"
@@ -102,7 +105,7 @@ impl Registry {
         expected.validate()?;
         let reference: Reference = format!("{application}@{release_manifest}").parse()?;
         tokio::time::timeout(Duration::from_secs(60), async {
-            let (manifest, _) = self.manifest(&reference).await?;
+            let (manifest, _) = self.manifest(&reference, &RegistryAuth::Anonymous).await?;
             ensure!(
                 manifest.artifact_type.as_deref() == Some(APPLICATION_TYPE),
                 "invalid WR application artifact type"
@@ -118,11 +121,54 @@ impl Registry {
         .await?
     }
 
-    async fn manifest(&self, reference: &Reference) -> Result<(OciImageManifest, String)> {
-        let (manifest, digest) = self
-            .client
-            .pull_image_manifest(reference, &RegistryAuth::Anonymous)
-            .await?;
+    pub async fn publish(&self, prepared: &PreparedPackage, auth: &RegistryAuth) -> Result<String> {
+        let reference: Reference = format!(
+            "{}/{}:{}",
+            prepared.registry, prepared.name, prepared.version
+        )
+        .parse()?;
+        let layers = prepared
+            .layers
+            .iter()
+            .map(|layer| {
+                ImageLayer::new(
+                    layer.bytes.clone(),
+                    layer.descriptor.media_type.clone(),
+                    layer.descriptor.annotations.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let config = Config::new(
+            prepared.config.clone(),
+            prepared.manifest.config.media_type.clone(),
+            None,
+        );
+        tokio::time::timeout(Duration::from_secs(60), async {
+            self.client
+                .push(
+                    &reference,
+                    &layers,
+                    config,
+                    auth,
+                    Some(prepared.manifest.clone()),
+                )
+                .await?;
+            let (published, digest) = self.manifest(&reference, auth).await?;
+            ensure!(
+                serde_json::to_value(published)? == serde_json::to_value(&prepared.manifest)?,
+                "published manifest differs from prepared artifact"
+            );
+            Ok(digest)
+        })
+        .await?
+    }
+
+    async fn manifest(
+        &self,
+        reference: &Reference,
+        auth: &RegistryAuth,
+    ) -> Result<(OciImageManifest, String)> {
+        let (manifest, digest) = self.client.pull_image_manifest(reference, auth).await?;
         super::release::validate_digest(&digest)?;
         if let Some(expected) = reference.digest() {
             ensure!(expected == digest, "OCI manifest digest mismatch");
@@ -152,6 +198,36 @@ impl Registry {
         self.client.pull_blob(reference, layer, &mut output).await?;
         expected.verify(&output.bytes)?;
         Ok(output.bytes)
+    }
+}
+
+pub(crate) fn auth_from_environment() -> Result<RegistryAuth> {
+    let token = environment("WR_REGISTRY_TOKEN")?;
+    let username = environment("WR_REGISTRY_USERNAME")?;
+    let password = environment("WR_REGISTRY_PASSWORD")?;
+    if token.is_some() && (username.is_some() || password.is_some()) {
+        bail!("WR_REGISTRY_TOKEN cannot be combined with username or password credentials");
+    }
+    if let Some(token) = token {
+        ensure!(!token.is_empty(), "WR_REGISTRY_TOKEN cannot be empty");
+        return Ok(RegistryAuth::Bearer(token));
+    }
+    match (username, password) {
+        (None, None) => Ok(RegistryAuth::Anonymous),
+        (Some(username), Some(password)) => {
+            ensure!(!username.is_empty(), "WR_REGISTRY_USERNAME cannot be empty");
+            ensure!(!password.is_empty(), "WR_REGISTRY_PASSWORD cannot be empty");
+            Ok(RegistryAuth::Basic(username, password))
+        }
+        _ => bail!("WR_REGISTRY_USERNAME and WR_REGISTRY_PASSWORD must be set together"),
+    }
+}
+
+fn environment(name: &str) -> Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => bail!("{name} must contain valid Unicode"),
     }
 }
 

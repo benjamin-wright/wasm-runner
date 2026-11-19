@@ -1935,6 +1935,42 @@ fn foreground_serving_honors_application_prefix() {
     }
 }
 
+#[test]
+fn publish_rejects_invalid_environment_credentials_before_contacting_registry() {
+    let fixture = ManifestFixture::new(
+        "name: hello\npath-prefix: /hello\npublish: {registry: registry.example/team, version: '1.0'}\nfunctions:\n  greet:\n    http: {method: GET, path: /}\n",
+    );
+    fixture.write_component("greet", b"prebuilt-component");
+
+    for (environment, expected) in [
+        (
+            vec![
+                ("WR_REGISTRY_TOKEN", "token"),
+                ("WR_REGISTRY_USERNAME", "user"),
+            ],
+            "WR_REGISTRY_TOKEN cannot be combined",
+        ),
+        (
+            vec![("WR_REGISTRY_USERNAME", "user")],
+            "WR_REGISTRY_USERNAME and WR_REGISTRY_PASSWORD must be set together",
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_wr"));
+        command
+            .arg("publish")
+            .arg(&fixture.path)
+            .env_remove("WR_REGISTRY_TOKEN")
+            .env_remove("WR_REGISTRY_USERNAME")
+            .env_remove("WR_REGISTRY_PASSWORD");
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn package_exports_a_complete_deterministic_release_without_building() {

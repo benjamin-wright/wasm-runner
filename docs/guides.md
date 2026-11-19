@@ -368,22 +368,29 @@ Existing data is retained. The process manager owns restarts; WR restores accept
 state and resumes polling.
 
 CI builds from the intended commit, ties the manifest version to the intended
-Git tag or attestation, then exports one OCI layout:
+Git tag or attestation, then publishes one complete application artifact:
 
 ```sh
 wr build ./greetings --release
-wr package ./greetings --output ./release-output
+wr publish ./greetings
 ```
 
-CI owns registry write credentials and copies the complete layout in one operation:
+Set either `WR_REGISTRY_TOKEN` or both `WR_REGISTRY_USERNAME` and
+`WR_REGISTRY_PASSWORD` in the job. Omit them for anonymous publishing. Keep one
+publish job per application so credential exposure and partial-failure scope remain
+small.
+
+To keep registry credentials outside WR, package and copy the layout with an
+external publisher instead:
 
 ```sh
+wr package ./greetings --output ./release-output
 oras cp --from-oci-layout ./release-output:1.4.0 ghcr.io/example/greetings:1.4.0
 ```
 
 Preserve the manifest and digests; use registry immutability and serialize
 conflicting publishers. [ORAS copy](https://github.com/oras-project/oras/blob/main/cmd/oras/root/cp.go)
-accepts OCI layouts directly. ORAS is a CI choice, not a WR runtime prerequisite.
+accepts OCI layouts directly. ORAS is optional.
 
 ## Inspect the host in a browser
 
