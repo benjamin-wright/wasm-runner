@@ -367,28 +367,22 @@ waits for its complete release. Remove a registration to withdraw its routes.
 Existing data is retained. The process manager owns restarts; WR restores accepted
 state and resumes polling.
 
-CI builds from the intended commit, then exports OCI layouts:
+CI builds from the intended commit, ties the manifest version to the intended
+Git tag or attestation, then exports one OCI layout:
 
 ```sh
 wr build ./greetings --release
-wr package ./greetings --source-commit <FULL_COMMIT_SHA> --output ./release-output
+wr package ./greetings --output ./release-output
 ```
 
-CI owns registry write credentials. Copy each function layout, the optional
-migration layout, and finally the release layout to the deterministic registry
-paths. For a `greetings` application with one `hello` function and SQL enabled,
-using ORAS:
+CI owns registry write credentials and copies the complete layout in one operation:
 
 ```sh
-oras cp --from-oci-layout ./release-output/functions/hello:1.4.0 ghcr.io/example/greetings/functions/hello:1.4.0
-oras cp --from-oci-layout ./release-output/migrations:1.4.0 ghcr.io/example/greetings/migrations:1.4.0
-oras cp --from-oci-layout ./release-output/release:1.4.0 ghcr.io/example/greetings/release:1.4.0
+oras cp --from-oci-layout ./release-output:1.4.0 ghcr.io/example/greetings:1.4.0
 ```
 
-Use a CI step that stops on any failed copy, so the release is never published
-after a failed child upload. Copy every configured function. Preserve manifests
-and digests; use registry immutability and serialize conflicting publishers.
-[ORAS copy](https://github.com/oras-project/oras/blob/main/cmd/oras/root/cp.go)
+Preserve the manifest and digests; use registry immutability and serialize
+conflicting publishers. [ORAS copy](https://github.com/oras-project/oras/blob/main/cmd/oras/root/cp.go)
 accepts OCI layouts directly. ORAS is a CI choice, not a WR runtime prerequisite.
 
 ## Inspect the host in a browser

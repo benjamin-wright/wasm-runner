@@ -19,7 +19,7 @@ local component and migration paths resolve relative to that manifest.
 | `wr update <DIRECTORY>` | Explicitly refresh application dependencies without compiling. |
 | `wr clean <DIRECTORY>` | Remove generated workspace files and build outputs. |
 | `wr run <PATH> [--port <PORT>] [--listen <IP:PORT>]` | Serve local built components in the foreground. Port and listen are mutually exclusive; the default is loopback port 8080. |
-| `wr package <PATH> --source-commit <SHA> --output <NEW_DIRECTORY>` | Write OCI layouts for CI to upload; never builds or pushes. |
+| `wr package <PATH> --output <NEW_DIRECTORY>` | Write one OCI layout for CI to upload; never builds or pushes. |
 | `wr start --config-repo <URL> --state-dir <DIRECTORY>` | Reconcile public Git and OCI releases in the foreground. |
 
 Both hosts accept `--admin-listen <LOOPBACK_IP:PORT>` for a separate read-only
@@ -857,47 +857,47 @@ The registry is an OCI hostname plus namespace, without a scheme, tag, or
 credentials. The version is a literal OCI tag. The schema specifies their exact
 shapes. Local run ignores these publishing fields and uses local components.
 
-After building at the intended source commit, CI runs:
+After building, CI runs:
 
 ```sh
-wr package ./application.yaml --source-commit <FULL_COMMIT_SHA> --output ./release-output
+wr package ./application.yaml --output ./release-output
 ```
 
 Package validates the manifest, existing component files, and migration records;
-it does not invoke Cargo, inspect Git, compile Wasm, execute SQL, or upload.
-The caller supplies the full 40- or 64-digit hexadecimal source commit. The output
-must not already exist. A filesystem error can leave a partial output directory;
-only upload after a successful command. Package cannot prove that existing
-components were built from the supplied commit; CI owns a clean, successful build.
+it does not invoke Cargo, inspect Git, compile Wasm, execute SQL, or upload. The
+output must not already exist. A filesystem error can leave a partial output
+directory; only upload after a successful command. The application manifest is
+the source of the publication version. CI owns source provenance, including tying
+that version to a Git tag or attestation, and owns proving that the existing
+components came from a clean, successful build.
 
-Each function gets an OCI image layout in `functions/<name>/`; SQL-enabled apps
-also get `migrations/` containing a JSON array of the existing migration records,
-including full immutable history. `release/` contains the release record. Layouts
-have `oci-layout`, `index.json`, and content-addressed `blobs/sha256/`. Each image
-has one payload layer, an empty `{}` config, and an index tag equal to the version.
-Payload media types are `application/wasm`,
-`application/vnd.wr.migrations.v1+json`, and `application/vnd.wr.release.v1+json`.
-There are no timestamps in generated manifests; identical inputs produce identical
-digests. Static-file artifacts are not yet supported by the runtime.
+The output is one OCI image layout with `oci-layout`, `index.json`, and
+content-addressed `blobs/sha256/`. Its artifact type is
+`application/vnd.wr.application+json`; its config is the OCI empty `{}` descriptor,
+and its index tag is the application version. The manifest has one release-record
+layer, one `application/wasm` layer per function, and an optional migrations layer
+of type `application/vnd.wr.migrations+json`. Layers use the title annotation
+`release`, the function name, or `migrations`. There are no timestamps in generated
+manifests; identical inputs produce identical digests. Static-file artifacts are
+not yet supported by the runtime.
 
-CI uploads each layout to `<registry>/<application>/<layout-path>:<version>`,
-copying manifests without rewriting them, and uploads `release` last. For example,
-`functions/hello` goes to `ghcr.io/example/greetings/functions/hello:1.4.0`.
-Use registry-side immutability and serialize publishers per application/version;
-a PR existence check alone cannot prevent publication races. Retry only identical
-content for an existing version. WR records observed version/digest bindings and
-rejects changed bindings when resolving them again; it does not continuously
-re-resolve tags for an already active unchanged release.
-
-The release JSON contains `format-version: 1`, `source-commit`, `version`,
+The release JSON is `application/vnd.wr.release+json` and contains `version`,
 `application`, `functions`, and `migrations`. `application` is normalized runtime
 configuration: name, prefix, KV/SQL configuration, and named function HTTP routes;
 it excludes build dependencies and publish metadata. `functions` maps names to
 artifact descriptors; `migrations` is a descriptor or null. Each descriptor has
-`manifest` (OCI manifest SHA-256), `blob` (payload SHA-256), and `size` in bytes.
-These references use the deterministic repositories above. The runtime checks
-configuration equality against Git, exact function membership, release version,
-media types, sizes, and digests before activation. It downloads children by digest.
+the payload SHA-256 `blob` and `size` in bytes.
+
+CI copies the single layout to `<registry>/<application>:<version>`, preserving the
+manifest and digests. Use registry-side immutability and serialize publishers per
+application/version; a PR existence check alone cannot prevent publication races.
+Retry only identical content for an existing version. The runtime first resolves
+the application tag and then pulls every layer by digest from that immutable
+manifest. It checks configuration equality against Git, exact layer membership,
+release version, media types, sizes, and digests before activation. WR records
+observed version/digest bindings and rejects changed bindings when resolving them
+again; it does not continuously re-resolve tags for an already active unchanged
+release.
 
 A release is limited to 128 MiB of combined payloads; its descriptor is limited
 to 1 MiB. Cached deployment metadata is limited to 128 MiB. Git file reads are limited to 1 MiB, registrations to 1,000. Git operations

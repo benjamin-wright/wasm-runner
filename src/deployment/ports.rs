@@ -23,6 +23,7 @@ pub(crate) trait Artifacts: Send {
     fn artifact(
         &mut self,
         repository: &str,
+        release_manifest: &str,
         expected: &Artifact,
         media_type: &str,
     ) -> impl Future<Output = Result<Vec<u8>>> + Send;

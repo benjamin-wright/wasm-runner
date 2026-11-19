@@ -70,7 +70,13 @@ impl Artifacts for Registry {
             .cloned()
             .context("release not published")
     }
-    async fn artifact(&mut self, _: &str, expected: &Artifact, _: &str) -> Result<Vec<u8>> {
+    async fn artifact(
+        &mut self,
+        _: &str,
+        _: &str,
+        expected: &Artifact,
+        _: &str,
+    ) -> Result<Vec<u8>> {
         let mut published = self.0.lock().unwrap();
         let bytes = published
             .blobs
@@ -169,7 +175,6 @@ impl Fixture {
         self.files.put(&format!("{name}.yaml"), manifest);
         let bytes = format!("component {name} {version}").into_bytes();
         let artifact = Artifact {
-            manifest: digest(format!("OCI {name} {version}").as_bytes()),
             blob: digest(&bytes),
             size: bytes.len() as u64,
         };
@@ -180,8 +185,6 @@ impl Fixture {
             .blobs
             .insert(artifact.blob.clone(), bytes);
         Release {
-            format_version: 1,
-            source_commit: "a".repeat(40),
             version: version.into(),
             application,
             functions: BTreeMap::from([("hello".into(), artifact)]),
@@ -348,7 +351,7 @@ async fn changed_runtime_configuration_requires_a_new_version() {
 #[tokio::test]
 async fn corrupt_artifacts_and_reassigned_versions_never_install() {
     let fixture = Fixture::new();
-    let mut release = fixture.authorize("first", "1");
+    let release = fixture.authorize("first", "1");
     fixture.registry.publish("first", release.clone());
     fixture.register(&["first"]);
     fixture
@@ -362,8 +365,16 @@ async fn corrupt_artifacts_and_reassigned_versions_never_install() {
     controller.poll().await.unwrap();
     assert!(fixture.error("first").unwrap().contains("mismatch"));
     assert!(fixture.host.names().is_empty());
-    release.source_commit = "b".repeat(40);
     fixture.registry.publish("first", release);
+    fixture
+        .registry
+        .0
+        .lock()
+        .unwrap()
+        .releases
+        .get_mut("registry.example/team/first:1")
+        .unwrap()
+        .0 = digest(b"reassigned manifest");
     controller.poll().await.unwrap();
     assert!(fixture.error("first").unwrap().contains("changed digest"));
     assert!(fixture.host.names().is_empty());

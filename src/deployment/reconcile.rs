@@ -226,7 +226,7 @@ where
         }
         self.snapshot.versions.insert(version_key, digest.clone());
         self.cache.save(&self.snapshot)?;
-        self.cache_artifacts(&base, &release).await?;
+        self.cache_artifacts(&base, &digest, &release).await?;
         self.check_authorization(name, source, &runtime, publish)
             .await?;
         let deployment = release.deployment(|artifact| self.cache.read(artifact))?;
@@ -242,16 +242,17 @@ where
         Ok(())
     }
 
-    async fn cache_artifacts(&mut self, base: &str, release: &release::Release) -> Result<()> {
-        for (function, artifact) in &release.functions {
+    async fn cache_artifacts(
+        &mut self,
+        base: &str,
+        release_manifest: &str,
+        release: &release::Release,
+    ) -> Result<()> {
+        for artifact in release.functions.values() {
             if self.cache.read(artifact).is_err() {
                 let bytes = self
                     .artifacts
-                    .artifact(
-                        &format!("{base}/functions/{function}"),
-                        artifact,
-                        release::COMPONENT_TYPE,
-                    )
+                    .artifact(base, release_manifest, artifact, release::COMPONENT_TYPE)
                     .await?;
                 self.cache.store(artifact, &bytes)?;
             }
@@ -261,11 +262,7 @@ where
         {
             let bytes = self
                 .artifacts
-                .artifact(
-                    &format!("{base}/migrations"),
-                    artifact,
-                    release::MIGRATIONS_TYPE,
-                )
+                .artifact(base, release_manifest, artifact, release::MIGRATIONS_TYPE)
                 .await?;
             self.cache.store(artifact, &bytes)?;
         }

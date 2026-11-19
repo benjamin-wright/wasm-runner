@@ -100,10 +100,12 @@ flowchart TD
 ```
 
 Run and package read existing components without invoking Cargo. Package writes
-OCI layouts for an external CI publisher. The release record is published last;
-its child digests bind the complete artifact set. Production reads only manifests
-from Git, never checks out application code or invokes application builds. The
-reconciler rechecks authorization after downloads and before installation.
+one OCI layout for an external CI publisher. Its application manifest contains the
+release record and every component or migration layer, while the release record
+binds the complete normalized artifact set. Production reads only manifests from
+Git, never checks out application code or invokes application builds. The
+reconciler resolves an immutable application manifest, downloads its referenced
+layers, and rechecks authorization before installation.
 
 YAML parsing and merge resolution use `yaml_serde`. The resolved document is
 validated by `jsonschema` against the embedded schema and deserialized into

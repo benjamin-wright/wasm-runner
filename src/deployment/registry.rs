@@ -1,8 +1,11 @@
-use super::release::{Artifact, LIMIT, RELEASE_TYPE, Release};
+use super::release::{
+    APPLICATION_TYPE, Artifact, COMPONENT_TYPE, LIMIT, MIGRATIONS_TYPE, RELEASE_TYPE, Release,
+};
 use anyhow::{Result, ensure};
 use oci_client::{
     Client, Reference,
     client::{ClientConfig, ClientProtocol},
+    manifest::{OciDescriptor, OciImageManifest},
     secrets::RegistryAuth,
 };
 use std::{
@@ -11,6 +14,9 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncWrite;
+
+const TITLE: &str = "org.opencontainers.image.title";
+const RELEASE_LIMIT: usize = 1024 * 1024;
 
 pub(crate) struct PublicArtifacts;
 
@@ -23,11 +29,12 @@ impl super::ports::Artifacts for PublicArtifacts {
     async fn artifact(
         &mut self,
         repository: &str,
+        release_manifest: &str,
         expected: &Artifact,
         media_type: &str,
     ) -> Result<Vec<u8>> {
         Registry::new(repository)?
-            .artifact(repository, expected, media_type)
+            .artifact(repository, release_manifest, expected, media_type)
             .await
     }
 }
@@ -61,89 +68,140 @@ impl Registry {
         })
     }
 
-    async fn payload(
-        &self,
-        reference: &str,
-        media_type: &str,
-        limit: usize,
-    ) -> Result<(String, Vec<u8>, Artifact)> {
-        let reference: Reference = reference.parse()?;
+    pub async fn release(&self, application: &str, version: &str) -> Result<(String, Release)> {
+        let reference: Reference = format!("{application}:{version}").parse()?;
         tokio::time::timeout(Duration::from_secs(60), async {
-            let (manifest, manifest_digest) = self
-                .client
-                .pull_image_manifest(&reference, &RegistryAuth::Anonymous)
-                .await?;
-            super::release::validate_digest(&manifest_digest)?;
-            if let Some(expected) = reference.digest() {
-                ensure!(expected == manifest_digest, "OCI manifest digest mismatch");
-            }
+            let (manifest, manifest_digest) = self.manifest(&reference).await?;
             ensure!(
-                manifest.layers.len() == 1,
-                "WR artifacts require exactly one layer"
+                manifest.artifact_type.as_deref() == Some(APPLICATION_TYPE),
+                "invalid WR application artifact type"
             );
-            let layer = &manifest.layers[0];
+            let release_layer = unique_layer(&manifest.layers, |layer| {
+                title(layer) == Some("release") && layer.media_type == RELEASE_TYPE
+            })?;
+            let bytes = self.blob(&reference, release_layer, RELEASE_LIMIT).await?;
+            let release: Release = serde_json::from_slice(&bytes)?;
+            release.validate()?;
             ensure!(
-                layer.media_type == media_type
-                    && layer.size >= 0
-                    && layer.size as u64 <= limit as u64,
-                "invalid artifact media type or size"
+                release.version == version,
+                "release version does not match authorized version"
             );
-            let artifact = Artifact {
-                manifest: manifest_digest.clone(),
-                blob: layer.digest.clone(),
-                size: layer.size as u64,
-            };
-            artifact.validate()?;
-            let mut output = LimitedBytes {
-                bytes: Vec::new(),
-                limit: layer.size as usize,
-            };
-            self.client
-                .pull_blob(&reference, layer, &mut output)
-                .await?;
-            artifact.verify(&output.bytes)?;
-            Ok((manifest_digest, output.bytes, artifact))
+            validate_layers(&manifest, &release)?;
+            Ok((manifest_digest, release))
         })
         .await?
     }
 
-    pub async fn release(&self, base: &str, version: &str) -> Result<(String, Release)> {
-        let (digest, bytes, _) = self
-            .payload(
-                &format!("{base}/release:{version}"),
-                RELEASE_TYPE,
-                1024 * 1024,
-            )
-            .await?;
-        let release: Release = serde_json::from_slice(&bytes)?;
-        release.validate()?;
-        ensure!(
-            release.version == version,
-            "release version does not match authorized version"
-        );
-        Ok((digest, release))
-    }
-
     pub async fn artifact(
         &self,
-        repository: &str,
+        application: &str,
+        release_manifest: &str,
         expected: &Artifact,
         media_type: &str,
     ) -> Result<Vec<u8>> {
         expected.validate()?;
-        let (_, bytes, actual) = self
-            .payload(
-                &format!("{repository}@{}", expected.manifest),
-                media_type,
-                LIMIT,
-            )
-            .await?;
-        ensure!(
-            actual.blob == expected.blob && actual.size == expected.size,
-            "artifact descriptor does not match release"
-        );
-        Ok(bytes)
+        let reference: Reference = format!("{application}@{release_manifest}").parse()?;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let (manifest, _) = self.manifest(&reference).await?;
+            ensure!(
+                manifest.artifact_type.as_deref() == Some(APPLICATION_TYPE),
+                "invalid WR application artifact type"
+            );
+            let layer = unique_layer(&manifest.layers, |layer| {
+                layer.media_type == media_type
+                    && layer.digest == expected.blob
+                    && layer.size >= 0
+                    && layer.size as u64 == expected.size
+            })?;
+            self.blob(&reference, layer, LIMIT).await
+        })
+        .await?
     }
+
+    async fn manifest(&self, reference: &Reference) -> Result<(OciImageManifest, String)> {
+        let (manifest, digest) = self
+            .client
+            .pull_image_manifest(reference, &RegistryAuth::Anonymous)
+            .await?;
+        super::release::validate_digest(&digest)?;
+        if let Some(expected) = reference.digest() {
+            ensure!(expected == digest, "OCI manifest digest mismatch");
+        }
+        Ok((manifest, digest))
+    }
+
+    async fn blob(
+        &self,
+        reference: &Reference,
+        layer: &OciDescriptor,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            layer.size >= 0 && layer.size as u64 <= limit as u64,
+            "artifact exceeds declared limit"
+        );
+        let expected = Artifact {
+            blob: layer.digest.clone(),
+            size: layer.size as u64,
+        };
+        expected.validate()?;
+        let mut output = LimitedBytes {
+            bytes: Vec::new(),
+            limit: layer.size as usize,
+        };
+        self.client.pull_blob(reference, layer, &mut output).await?;
+        expected.verify(&output.bytes)?;
+        Ok(output.bytes)
+    }
+}
+
+fn validate_layers(manifest: &OciImageManifest, release: &Release) -> Result<()> {
+    let expected_count = 1 + release.functions.len() + usize::from(release.migrations.is_some());
+    ensure!(
+        manifest.layers.len() == expected_count,
+        "application manifest layers do not match release"
+    );
+    for (name, artifact) in &release.functions {
+        matching_layer(&manifest.layers, name, COMPONENT_TYPE, artifact)?;
+    }
+    if let Some(artifact) = &release.migrations {
+        matching_layer(&manifest.layers, "migrations", MIGRATIONS_TYPE, artifact)?;
+    }
+    Ok(())
+}
+
+fn matching_layer<'a>(
+    layers: &'a [OciDescriptor],
+    name: &str,
+    media_type: &str,
+    expected: &Artifact,
+) -> Result<&'a OciDescriptor> {
+    unique_layer(layers, |layer| {
+        title(layer) == Some(name)
+            && layer.media_type == media_type
+            && layer.digest == expected.blob
+            && layer.size >= 0
+            && layer.size as u64 == expected.size
+    })
+}
+
+fn unique_layer(
+    layers: &[OciDescriptor],
+    predicate: impl Fn(&OciDescriptor) -> bool,
+) -> Result<&OciDescriptor> {
+    let mut matches = layers.iter().filter(|layer| predicate(layer));
+    let layer = matches
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("application manifest is missing a required layer"))?;
+    ensure!(
+        matches.next().is_none(),
+        "application manifest contains duplicate required layers"
+    );
+    Ok(layer)
+}
+
+fn title(layer: &OciDescriptor) -> Option<&str> {
+    layer.annotations.as_ref()?.get(TITLE).map(String::as_str)
 }
 
 struct LimitedBytes {

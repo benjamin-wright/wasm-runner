@@ -1949,8 +1949,6 @@ fn package_exports_a_complete_deterministic_release_without_building() {
         let result = wr(&[
             "package",
             fixture.path.to_str().unwrap(),
-            "--source-commit",
-            &"a".repeat(40),
             "--output",
             output.to_str().unwrap(),
         ]);
@@ -1960,24 +1958,54 @@ fn package_exports_a_complete_deterministic_release_without_building() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
-    for artifact in ["functions/greet", "migrations", "release"] {
-        let first = first.join(artifact);
-        let second = second.join(artifact);
-        let index = fs::read(first.join("index.json")).unwrap();
-        assert_eq!(index, fs::read(second.join("index.json")).unwrap());
-        let index: serde_json::Value = serde_json::from_slice(&index).unwrap();
-        let digest = index["manifests"][0]["digest"].as_str().unwrap();
-        let manifest = fs::read(first.join("blobs/sha256").join(&digest[7..])).unwrap();
-        assert_eq!(format!("sha256:{:x}", Sha256::digest(&manifest)), digest);
-        let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
-        let blob = manifest["layers"][0]["digest"].as_str().unwrap();
+
+    let index = fs::read(first.join("index.json")).unwrap();
+    assert_eq!(index, fs::read(second.join("index.json")).unwrap());
+    let index: serde_json::Value = serde_json::from_slice(&index).unwrap();
+    assert_eq!(
+        index["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"],
+        "1.0"
+    );
+    let manifest_digest = index["manifests"][0]["digest"].as_str().unwrap();
+    let manifest_bytes = fs::read(first.join("blobs/sha256").join(&manifest_digest[7..])).unwrap();
+    assert_eq!(
+        format!("sha256:{:x}", Sha256::digest(&manifest_bytes)),
+        manifest_digest
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(
+        manifest["artifactType"],
+        "application/vnd.wr.application+json"
+    );
+    let layers = manifest["layers"].as_array().unwrap();
+    assert_eq!(layers.len(), 3);
+
+    for layer in layers {
+        let blob = layer["digest"].as_str().unwrap();
         let bytes = fs::read(first.join("blobs/sha256").join(&blob[7..])).unwrap();
         assert_eq!(format!("sha256:{:x}", Sha256::digest(&bytes)), blob);
-        assert_eq!(
-            bytes.len() as u64,
-            manifest["layers"][0]["size"].as_u64().unwrap()
-        );
+        assert_eq!(bytes.len() as u64, layer["size"].as_u64().unwrap());
     }
+    let titles: Vec<_> = layers
+        .iter()
+        .map(|layer| {
+            layer["annotations"]["org.opencontainers.image.title"]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(titles, ["release", "greet", "migrations"]);
+    assert_eq!(layers[1]["mediaType"].as_str().unwrap(), "application/wasm");
+    let release_digest = layers[0]["digest"].as_str().unwrap();
+    let release: serde_json::Value = serde_json::from_slice(
+        &fs::read(first.join("blobs/sha256").join(&release_digest[7..])).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(release["version"], "1.0");
+    assert!(release.get("source-commit").is_none());
+    assert!(release.get("format-version").is_none());
+    assert_eq!(release["functions"]["greet"]["blob"], layers[1]["digest"]);
+
     assert!(!fixture.directory.join("Cargo.toml").exists());
     assert!(!fixture.directory.join(".wr-data").exists());
 }

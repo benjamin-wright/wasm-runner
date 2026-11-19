@@ -1,0 +1,5 @@
+applications:
+  draughts:
+    repo: https://example.com/team/greetings.git
+    branch: main
+    path: application.yaml

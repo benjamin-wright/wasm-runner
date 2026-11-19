@@ -8,14 +8,14 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub(crate) const LIMIT: usize = 128 * 1024 * 1024;
-pub(crate) const RELEASE_TYPE: &str = "application/vnd.wr.release.v1+json";
+pub(crate) const APPLICATION_TYPE: &str = "application/vnd.wr.application+json";
+pub(crate) const RELEASE_TYPE: &str = "application/vnd.wr.release+json";
 pub(crate) const COMPONENT_TYPE: &str = "application/wasm";
-pub(crate) const MIGRATIONS_TYPE: &str = "application/vnd.wr.migrations.v1+json";
+pub(crate) const MIGRATIONS_TYPE: &str = "application/vnd.wr.migrations+json";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Artifact {
-    pub manifest: String,
     pub blob: String,
     pub size: u64,
 }
@@ -23,8 +23,6 @@ pub(crate) struct Artifact {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct Release {
-    pub format_version: u32,
-    pub source_commit: String,
     pub version: String,
     pub application: serde_json::Value,
     pub functions: BTreeMap<String, Artifact>,
@@ -49,7 +47,6 @@ pub(crate) fn validate_digest(value: &str) -> Result<()> {
 
 impl Artifact {
     pub fn validate(&self) -> Result<()> {
-        validate_digest(&self.manifest)?;
         validate_digest(&self.blob)?;
         ensure!(self.size <= LIMIT as u64, "artifact exceeds 128 MiB");
         Ok(())
@@ -66,12 +63,6 @@ impl Artifact {
 
 impl Release {
     pub fn validate(&self) -> Result<manifest::ApplicationDefinition> {
-        ensure!(self.format_version == 1, "unsupported release format");
-        ensure!(
-            matches!(self.source_commit.len(), 40 | 64)
-                && self.source_commit.bytes().all(|b| b.is_ascii_hexdigit()),
-            "release requires a source commit ID"
-        );
         let application = manifest::parse(&serde_json::to_string(&self.application)?)?;
         ensure!(
             application.runtime_config() == self.application,
