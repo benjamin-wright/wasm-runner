@@ -867,11 +867,11 @@ wr publish ./application.yaml
 Publish validates the manifest, existing component files, and migration records,
 then uploads one complete artifact to `<registry>/<application>:<version>`. It
 does not invoke Cargo, inspect Git, compile Wasm, execute SQL, or create a package
-directory. Credentials come only from the environment: set `WR_REGISTRY_TOKEN`,
-or set both `WR_REGISTRY_USERNAME` and `WR_REGISTRY_PASSWORD`; set neither mode for
-anonymous access. Mixed token and username/password configuration, incomplete
-basic credentials, and empty values fail locally. WR does not parse `.env` files
-or persist credentials; the shell, `direnv`, or CI is responsible for injection.
+directory. Credentials come only from the environment: set both
+`WR_REGISTRY_USERNAME` and `WR_REGISTRY_PASSWORD`, or set neither for anonymous
+access. Incomplete Basic credentials and empty values fail locally. WR does not
+parse `.env` files or persist credentials; the shell, `direnv`, or CI is
+responsible for injection.
 
 For an external publisher, use the export form instead:
 

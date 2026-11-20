@@ -375,10 +375,9 @@ wr build ./greetings --release
 wr publish ./greetings
 ```
 
-Set either `WR_REGISTRY_TOKEN` or both `WR_REGISTRY_USERNAME` and
-`WR_REGISTRY_PASSWORD` in the job. Omit them for anonymous publishing. Keep one
-publish job per application so credential exposure and partial-failure scope remain
-small.
+Set both `WR_REGISTRY_USERNAME` and `WR_REGISTRY_PASSWORD` in the job. Omit them
+for anonymous publishing. Keep one publish job per application so credential
+exposure and partial-failure scope remain small.
 
 To keep registry credentials outside WR, package and copy the layout with an
 external publisher instead:

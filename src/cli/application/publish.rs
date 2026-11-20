@@ -17,6 +17,12 @@ impl Publish {
             "{}/{}:{}",
             prepared.registry, prepared.name, prepared.version
         );
+        let auth_mode = match &auth {
+            oci_client::secrets::RegistryAuth::Anonymous => "anonymous",
+            oci_client::secrets::RegistryAuth::Basic(_, _) => "basic",
+            _ => "configured",
+        };
+        println!("Registry authentication: {auth_mode}");
         let digest = super::super::runtime()?.block_on(registry.publish(&prepared, &auth))?;
         println!("Published {reference} ({digest})");
         Ok(())

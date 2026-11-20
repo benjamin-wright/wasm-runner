@@ -1944,22 +1944,25 @@ fn publish_rejects_invalid_environment_credentials_before_contacting_registry() 
 
     for (environment, expected) in [
         (
-            vec![
-                ("WR_REGISTRY_TOKEN", "token"),
-                ("WR_REGISTRY_USERNAME", "user"),
-            ],
-            "WR_REGISTRY_TOKEN cannot be combined",
-        ),
-        (
             vec![("WR_REGISTRY_USERNAME", "user")],
             "WR_REGISTRY_USERNAME and WR_REGISTRY_PASSWORD must be set together",
+        ),
+        (
+            vec![("WR_REGISTRY_PASSWORD", "password")],
+            "WR_REGISTRY_USERNAME and WR_REGISTRY_PASSWORD must be set together",
+        ),
+        (
+            vec![
+                ("WR_REGISTRY_USERNAME", ""),
+                ("WR_REGISTRY_PASSWORD", "password"),
+            ],
+            "WR_REGISTRY_USERNAME cannot be empty",
         ),
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_wr"));
         command
             .arg("publish")
             .arg(&fixture.path)
-            .env_remove("WR_REGISTRY_TOKEN")
             .env_remove("WR_REGISTRY_USERNAME")
             .env_remove("WR_REGISTRY_PASSWORD");
         for (name, value) in environment {

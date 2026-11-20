@@ -202,16 +202,8 @@ impl Registry {
 }
 
 pub(crate) fn auth_from_environment() -> Result<RegistryAuth> {
-    let token = environment("WR_REGISTRY_TOKEN")?;
     let username = environment("WR_REGISTRY_USERNAME")?;
     let password = environment("WR_REGISTRY_PASSWORD")?;
-    if token.is_some() && (username.is_some() || password.is_some()) {
-        bail!("WR_REGISTRY_TOKEN cannot be combined with username or password credentials");
-    }
-    if let Some(token) = token {
-        ensure!(!token.is_empty(), "WR_REGISTRY_TOKEN cannot be empty");
-        return Ok(RegistryAuth::Bearer(token));
-    }
     match (username, password) {
         (None, None) => Ok(RegistryAuth::Anonymous),
         (Some(username), Some(password)) => {
